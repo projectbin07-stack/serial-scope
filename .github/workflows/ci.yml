@@ -61,5 +61,5 @@ jobs:
           serial-scope monitor loop:// --send 'a:1,b:2\n' --duration 0.5 --log loop.sslog
           serial-scope stats loop.sslog --json
           set +e
-          serial-scope replay demo-ina219.sslog --show none --max-errors 0
+          serial-scope replay demo-odometry.sslog --show none --max-errors 0
           test $? -eq 3
