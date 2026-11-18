@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.21,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "serial-scope"
+dynamic = ["version"]
+description = "Serial monitor, logger and live plotter that decodes structured telemetry (plotter, CSV, JSON, CRC-checked and COBS frames)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Navaneeth KG" }]
+keywords = ["serial", "uart", "serial-monitor", "serial-plotter", "telemetry", "arduino", "esp32", "stm32", "cobs", "pyserial"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: X11 Applications",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: Terminals :: Serial",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Typing :: Typed",
+]
+dependencies = ["pyserial>=3.5,<4"]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11,<3",
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
+    "ruff>=0.6,<1",
+    "types-pyserial>=3.5,<4",
+]
+
+[project.scripts]
+serial-scope = "serial_scope.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/projectbin07-stack/serial-scope"
+Issues = "https://github.com/projectbin07-stack/serial-scope/issues"
+Changelog = "https://github.com/projectbin07-stack/serial-scope/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/serial_scope/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/serial_scope"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src", "tests"]
+mypy_path = ["src", "tests"]
+explicit_package_bases = true
+
+[tool.coverage.run]
+source = ["serial_scope"]
+# gui.py is the thin Tk view (widget construction and event wiring). Its logic lives in
+# app.py, plotmodel.py and terminal.py, which are measured; gui.py itself is exercised by the
+# smoke test in tests/test_gui_smoke.py, which needs a display.
+omit = ["*/serial_scope/gui.py"]
+
+[tool.coverage.report]
+exclude_also = ["if __name__ == .__main__.:", "if TYPE_CHECKING:"]
