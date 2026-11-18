@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.13"]
+    env:
+      # Make the Tk smoke test fail instead of skipping if no display is available.
+      SERIAL_SCOPE_REQUIRE_GUI: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Xvfb
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Format
+        run: ruff format --check .
+      - name: Type check
+        run: mypy
+      - name: Test (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pytest -rs --cov --cov-report=term-missing --cov-fail-under=85
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: pytest -rs --cov --cov-report=term-missing --cov-fail-under=85
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          serial-scope --version
+          serial-scope decoders
+          serial-scope list
+          for kind in plotter ina219 odometry jsonl csv; do
+            serial-scope demo "demo-$kind.sslog" --kind "$kind" --seconds 5
+            serial-scope stats "demo-$kind.sslog"
+          done
+          serial-scope replay demo-plotter.sslog --show text --csv out.csv --trigger 're:RSSI -> mark'
+          test "$(wc -l < out.csv)" -gt 200
+          serial-scope monitor loop:// --send 'a:1,b:2\n' --duration 0.5 --log loop.sslog
+          serial-scope stats loop.sslog --json
+          set +e
+          serial-scope replay demo-ina219.sslog --show none --max-errors 0
+          test $? -eq 3
