@@ -10,7 +10,7 @@ import pytest
 from serial_scope.app import AppController, UiUpdate
 from serial_scope.demo import write_demo_log
 from serial_scope.logfile import LogReader
-from serial_scope.transport import FakeTransport
+from serial_scope.transport import FakeTransport, TransportError
 
 
 def _poll_until_finished(ctl: AppController, timeout: float = 20.0) -> list[UiUpdate]:
@@ -120,4 +120,131 @@ def test_set_decoder_resets_session() -> None:
     assert ctl.session is not old
     assert ctl.session.decoder_name == "jsonl"
     assert ctl.poll() == UiUpdate()  # nothing running
+    ctl.close()
+
+
+# -- odometry command panel -------------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _connected(
+    script: list[bytes | None], decoder: str = "odometry"
+) -> tuple[AppController, FakeTransport, _Clock]:
+    clock = _Clock()
+    ctl = AppController(decoder=decoder, clock=clock)
+    fake = FakeTransport([None, *script] + [None] * 2000, sleep=time.sleep)
+    ctl.start(fake)
+    deadline = time.monotonic() + 5
+    while not ctl.connected and time.monotonic() < deadline:
+        ctl.poll()
+        time.sleep(0.01)
+    assert ctl.connected
+    return ctl, fake, clock
+
+
+def _sent_frames(fake: FakeTransport) -> list[tuple[str, int, dict[str, object]]]:
+    from serial_scope.decoders.framing import cobs_decode
+    from serial_scope.decoders.odometry import decode_packet
+
+    out = []
+    for raw in bytes(fake.written).split(b"\x00"):
+        if raw:
+            msg = decode_packet(cobs_decode(raw))
+            out.append((msg.name, msg.seq, msg.fields))
+    return out
+
+
+def test_command_target_follows_the_decoder(tmp_path: Path) -> None:
+    assert AppController(decoder="odometry").command_target == "odometry"
+    ctl = AppController()
+    assert ctl.command_target is None  # auto, still detecting
+    log = tmp_path / "odo.sslog"
+    write_demo_log(log, "odometry", seconds=3)
+    ctl.open_replay(log, speed=0)
+    _poll_until_finished(ctl)
+    assert ctl.command_target == "odometry"
+    with pytest.raises(ValueError, match="not connected"):
+        ctl.send_velocity(0.1, 0.0, 0.0)  # a replay cannot be commanded
+    ctl.set_decoder("plotter")
+    assert ctl.command_target is None
+    ctl.close()
+
+
+def test_velocity_repeat_stop_and_parameters() -> None:
+    from serial_scope.decoders.odometry import encode_frame
+
+    reply = encode_frame("param_value", 9, {"id": 10, "status": 0, "value": 500.0})
+    ctl, fake, clock = _connected([])
+    command = ctl.send_velocity(0.2, 0.0, 0.1, repeat=True)
+    assert command.text.startswith("velocity vx=0.2")
+    assert ctl.repeat_velocity == (0.2, 0.0, 0.1)
+    ctl.poll()  # less than 0.1 s later: nothing repeated
+    clock.now += 0.1
+    ctl.poll()
+    clock.now += 0.25
+    ctl.poll()
+    ctl.stop_motors()
+    clock.now += 1.0
+    ctl.poll()  # stopped: no more repeats
+    ctl.send_param_get("watchdog_ms")
+    ctl.send_param_set("kp", 0.05)
+    frames = _sent_frames(fake)
+    assert [(name, seq) for name, seq, _ in frames] == [
+        ("velocity_command", 0),
+        ("velocity_command", 1),
+        ("velocity_command", 2),
+        ("velocity_command", 3),
+        ("param_get", 4),
+        ("param_set", 5),
+    ]
+    assert frames[3][2] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
+    assert frames[4][2] == {"id": 10}
+    counters = dict(ctl.counter_rows())
+    assert int(counters["bytes sent"]) == len(fake.written)
+    # The reply arrives as a decoded frame and is reported to the panel.
+    fake.script.insert(0, reply)
+    deadline = time.monotonic() + 5
+    replies: list[str] = []
+    while not replies and time.monotonic() < deadline:
+        update = ctl.poll()
+        replies += update.replies
+        time.sleep(0.01)
+    assert replies == ["PARAM_VALUE watchdog_ms = 500 (ok)"]
+    ctl.close()
+    assert ctl.repeat_velocity is None
+
+
+def test_repeat_stops_when_the_link_fails() -> None:
+    class _Flaky(FakeTransport):
+        writes = 0
+
+        def write(self, data: bytes) -> None:
+            self.writes += 1
+            if self.writes > 1:
+                raise TransportError("unplugged")
+            super().write(data)
+
+    clock = _Clock()
+    ctl = AppController(decoder="odometry", clock=clock)
+    fake = _Flaky([None] * 2000, sleep=time.sleep)
+    ctl.start(fake)
+    deadline = time.monotonic() + 5
+    while not ctl.connected and time.monotonic() < deadline:
+        ctl.poll()
+        time.sleep(0.01)
+    ctl.send_velocity(0.3, 0.0, 0.0, repeat=True)
+    clock.now += 0.2
+    update = ctl.poll()
+    assert update.repeat_stopped
+    assert ctl.repeat_velocity is None
+    assert any("velocity repeat stopped" in s for s in update.status)
+    with pytest.raises(ValueError):
+        ctl.stop_motors()
     ctl.close()

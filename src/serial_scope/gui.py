@@ -15,7 +15,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from serial_scope import __version__
 from serial_scope.app import BAUD_RATES, MAX_TERMINAL_CHARS, AppController, UiUpdate
+from serial_scope.commands import REPEAT_HZ
 from serial_scope.decoders import available_decoders
+from serial_scope.decoders.odometry import PARAM_NAMES
 from serial_scope.plotmodel import (
     THEMES,
     PlotArea,
@@ -75,7 +77,7 @@ class MainWindow:
     def _build(self) -> None:
         root = self.root
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(1, weight=1)
+        root.rowconfigure(2, weight=1)
 
         bar = ttk.Frame(root, padding=(8, 6))
         bar.grid(row=0, column=0, sticky="ew")
@@ -117,8 +119,10 @@ class MainWindow:
         self.theme_btn = ttk.Button(bar, text="Dark", command=self.toggle_theme, width=6)
         self.theme_btn.pack(side="right")
 
+        self._build_command_panel(root)
+
         panes = ttk.PanedWindow(root, orient="vertical")
-        panes.grid(row=1, column=0, sticky="nsew", padx=8)
+        panes.grid(row=2, column=0, sticky="nsew", padx=8)
 
         plot_frame = ttk.Frame(panes)
         plot_frame.columnconfigure(0, weight=1)
@@ -240,7 +244,65 @@ class MainWindow:
 
         self.status_var = tk.StringVar(value="not connected")
         status = ttk.Label(root, textvariable=self.status_var, anchor="w", padding=(8, 3))
-        status.grid(row=2, column=0, sticky="ew")
+        status.grid(row=3, column=0, sticky="ew")
+
+    def _build_command_panel(self, root: tk.Tk) -> None:
+        """Velocity and parameter commands for encoder-odometry-firmware.
+
+        Shown only while the odometry decoder is in use (see :meth:`sync_command_panel`).
+        """
+        panel = ttk.Frame(root, padding=(8, 0, 8, 6))
+        ttk.Label(panel, text="Odometry:").pack(side="left")
+        self.vel_vars: list[tk.StringVar] = []
+        for label in ("vx m/s", "vy m/s", "wz rad/s"):
+            ttk.Label(panel, text=label).pack(side="left", padx=(8, 2))
+            var = tk.StringVar(value="0")
+            ttk.Entry(panel, textvariable=var, width=6).pack(side="left")
+            self.vel_vars.append(var)
+        ttk.Button(panel, text="Send vel", command=self.send_velocity, width=9).pack(
+            side="left", padx=(8, 2)
+        )
+        self.repeat_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(panel, text=f"Repeat {REPEAT_HZ:g} Hz", variable=self.repeat_var).pack(
+            side="left", padx=4
+        )
+        self.stop_btn = tk.Button(
+            panel,
+            text="STOP",
+            command=self.stop_motors,
+            width=7,
+            font=("Segoe UI", 9, "bold"),
+            foreground="white",
+            background="#c0392b",
+            activebackground="#e74c3c",
+            activeforeground="white",
+        )
+        self.stop_btn.pack(side="left", padx=(4, 14))
+        ttk.Label(panel, text="Param").pack(side="left")
+        self.param_var = tk.StringVar(value="kp")
+        ttk.Combobox(
+            panel, textvariable=self.param_var, values=list(PARAM_NAMES.values()), width=18
+        ).pack(side="left", padx=4)
+        self.param_value_var = tk.StringVar()
+        ttk.Entry(panel, textvariable=self.param_value_var, width=8).pack(side="left")
+        ttk.Button(panel, text="Get", command=self.param_get, width=5).pack(
+            side="left", padx=(4, 2)
+        )
+        ttk.Button(panel, text="Set", command=self.param_set, width=5).pack(side="left")
+        self.reply_var = tk.StringVar(value="")
+        ttk.Label(panel, textvariable=self.reply_var).pack(side="left", padx=(10, 0))
+        self.command_panel = panel
+        self.command_panel_shown = False
+
+    def sync_command_panel(self) -> None:
+        """Show the odometry command panel while the odometry decoder is in use."""
+        want = self.ctl.command_target == "odometry"
+        if want and not self.command_panel_shown:
+            self.command_panel.grid(row=1, column=0, sticky="ew")
+        elif not want and self.command_panel_shown:
+            self.command_panel.grid_remove()
+            self.ctl.repeat_velocity = None
+        self.command_panel_shown = want
 
     # -- theme -------------------------------------------------------------------------
 
@@ -305,6 +367,51 @@ class MainWindow:
         """Switch decoder; channels and counters start again from the next bytes."""
         self.ctl.set_decoder(self.decoder_var.get())
         self._clear_view()
+        self.sync_command_panel()
+
+    # -- odometry commands -------------------------------------------------------------
+
+    def _command_done(self, text: str) -> None:
+        self._status(f"sent: {text}")
+        self.events_list.insert("end", f"sent  {text}")
+
+    def send_velocity(self) -> None:
+        try:
+            vx, vy, wz = (float(v.get()) for v in self.vel_vars)
+            command = self.ctl.send_velocity(vx, vy, wz, repeat=self.repeat_var.get())
+        except ValueError as exc:
+            self._status(f"not sent: {exc}")
+            return
+        suffix = f" (repeating at {REPEAT_HZ:g} Hz)" if self.repeat_var.get() else ""
+        self._command_done(command.text + suffix)
+
+    def stop_motors(self) -> None:
+        self.repeat_var.set(False)
+        try:
+            command = self.ctl.stop_motors()
+        except ValueError as exc:
+            self._status(f"stop not sent: {exc}")
+            return
+        self._command_done(command.text)
+
+    def param_get(self) -> None:
+        try:
+            command = self.ctl.send_param_get(self.param_var.get())
+        except ValueError as exc:
+            self._status(f"not sent: {exc}")
+            return
+        self.reply_var.set("waiting for reply...")
+        self._command_done(command.text)
+
+    def param_set(self) -> None:
+        try:
+            value = float(self.param_value_var.get())
+            command = self.ctl.send_param_set(self.param_var.get(), value)
+        except ValueError as exc:
+            self._status(f"not sent: {exc}")
+            return
+        self.reply_var.set("waiting for reply...")
+        self._command_done(command.text)
 
     # -- connection --------------------------------------------------------------------
 
@@ -600,6 +707,7 @@ class MainWindow:
             self.draw_plot()
         if self.stats_throttle.ready():
             self.refresh_tables()
+            self.sync_command_panel()
         self._schedule()
 
     def apply_update(self, update: UiUpdate) -> None:
@@ -617,6 +725,10 @@ class MainWindow:
             self.events_list.itemconfigure("end", foreground=color)
         if update.events:
             self.events_list.see("end")
+        if update.replies:
+            self.reply_var.set(update.replies[-1])
+        if update.repeat_stopped:
+            self.repeat_var.set(False)
         for _ in range(min(update.beeps, 3)):
             self.root.bell()
         if update.status:

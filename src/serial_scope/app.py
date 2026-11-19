@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from serial_scope.channels import DEFAULT_BUFFER
+from serial_scope.commands import REPEAT_HZ, Command, OdometryCommander
 from serial_scope.connection import CONNECTED, FINISHED, ReconnectingSource, StatusEvent
 from serial_scope.events import (
     INFO,
@@ -74,6 +75,8 @@ class UiUpdate:
     chunks: int = 0
     connected: bool | None = None
     finished: bool = False
+    replies: list[str] = field(default_factory=list)  # PARAM_VALUE answers
+    repeat_stopped: bool = False  # a repeated velocity command could not be sent
 
 
 class AppController:
@@ -98,6 +101,9 @@ class AppController:
         self._renderer = TextRenderer()
         self._hex_offset = 0
         self.is_replay = False
+        self.commander = OdometryCommander()
+        self.repeat_velocity: tuple[float, float, float] | None = None
+        self._last_repeat = 0.0
 
     def _new_session(self) -> Session:
         return Session(
@@ -141,6 +147,7 @@ class AppController:
         self.start(ReplayTransport(path, speed), auto_reconnect=False)
 
     def disconnect(self) -> None:
+        self.repeat_velocity = None
         reader, self.reader = self.reader, None
         if reader is not None:
             reader.stop()
@@ -171,6 +178,59 @@ class AppController:
             raise ValueError("device is not connected; nothing was sent")
         self.session.record_tx(data, self.clock())
         return data
+
+    # -- odometry commands -------------------------------------------------------------
+
+    @property
+    def command_target(self) -> str | None:
+        """``"odometry"`` while the encoder-odometry-firmware decoder is in use (forced, or
+        chosen by auto-detection): the GUI then shows its command panel."""
+        active = self.session.active_decoder
+        if self.decoder_name == "odometry" or (active is not None and active.name == "odometry"):
+            return "odometry"
+        return None
+
+    def _send_frame(self, command: Command) -> Command:
+        if self.reader is None or self.is_replay:
+            raise ValueError("not connected")
+        if not self.reader.write(command.frame):
+            raise ValueError("device is not connected; nothing was sent")
+        self.session.record_tx(command.frame, self.clock())
+        return command
+
+    def send_velocity(self, vx: float, vy: float, wz: float, repeat: bool = False) -> Command:
+        """Send one VELOCITY_COMMAND. With ``repeat`` it is re-sent at :data:`REPEAT_HZ`
+        from :meth:`poll` until :meth:`stop_motors`, a disconnect or a failed write."""
+        command = self._send_frame(self.commander.velocity(vx, vy, wz))
+        self.repeat_velocity = (vx, vy, wz) if repeat else None
+        self._last_repeat = self.clock()
+        return command
+
+    def stop_motors(self) -> Command:
+        """Stop repeating and send a zero velocity."""
+        self.repeat_velocity = None
+        return self._send_frame(self.commander.stop())
+
+    def send_param_get(self, param: str) -> Command:
+        return self._send_frame(self.commander.param_get(param))
+
+    def send_param_set(self, param: str, value: float) -> Command:
+        return self._send_frame(self.commander.param_set(param, value))
+
+    def _repeat_command(self, update: UiUpdate) -> None:
+        if self.repeat_velocity is None:
+            return
+        now = self.clock()
+        if now - self._last_repeat < 1.0 / REPEAT_HZ:
+            return
+        try:
+            self._send_frame(self.commander.velocity(*self.repeat_velocity))
+        except ValueError as exc:
+            self.repeat_velocity = None
+            update.status.append(f"velocity repeat stopped: {exc}")
+            update.repeat_stopped = True
+            return
+        self._last_repeat = now
 
     def start_recording(self, path: str | Path, max_mb: float | None = None) -> Path:
         meta: dict[str, object] = {}
@@ -205,6 +265,7 @@ class AppController:
         update = UiUpdate()
         if self.reader is None:
             return update
+        self._repeat_command(update)
         before = set(self.session.channels.names())
         for item in self.reader.drain(max_items):
             if isinstance(item, StatusEvent):
@@ -252,6 +313,9 @@ class AppController:
                 update.events.append(f"{_clock_str(event.t)}  error  {event.kind}: {event.detail}")
             elif isinstance(event, Notice):
                 update.events.append(f"{_clock_str(event.t)}  notice  {event.kind}: {event.detail}")
+            elif isinstance(event, TextLine) and event.text.startswith("PARAM_VALUE "):
+                update.replies.append(event.text)
+                update.events.append(f"{_clock_str(event.t)}  reply  {event.text}")
             elif isinstance(event, TriggerFired):
                 update.events.append(
                     f"{_clock_str(event.t)}  trigger  {event.trigger}: {event.detail}"
