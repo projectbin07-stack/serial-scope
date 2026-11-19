@@ -247,6 +247,8 @@ class OdometryDecoder(CobsFrameDecoder):
     def __init__(self) -> None:
         super().__init__()
         self.last_seq: int | None = None
+        self.last_param_value: Message | None = None
+        """The most recent PARAM_VALUE reply (the answer to a get or set)."""
         self._clock = ClockUnwrapper(32, 1e-6)
 
     def decode_frame(self, t: float, raw: bytes) -> list[Event]:
@@ -261,6 +263,8 @@ class OdometryDecoder(CobsFrameDecoder):
         self.last_seq = msg.seq
         self.counts["frames"] += 1
         self.counts[msg.name] += 1
+        if msg.name == "param_value":
+            self.last_param_value = msg
         events = message_to_events(msg, t)
         if "t_us" in msg.fields:
             # The 32-bit microsecond clock wraps every ~71.6 min.

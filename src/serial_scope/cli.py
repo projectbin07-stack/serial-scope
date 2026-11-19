@@ -1,4 +1,4 @@
-"""Command-line interface: list, monitor, replay, stats, demo, decoders, gui."""
+"""Command-line interface: list, monitor, replay, stats, send, demo, decoders, gui."""
 
 from __future__ import annotations
 
@@ -12,8 +12,16 @@ from datetime import datetime, timezone
 from typing import Any, TextIO
 
 from serial_scope import __version__
+from serial_scope.commands import (
+    REPEAT_HZ,
+    Command,
+    CommandError,
+    OdometryCommander,
+    parse_action,
+)
 from serial_scope.connection import ReconnectingSource
 from serial_scope.decoders import available_decoders
+from serial_scope.decoders.odometry import PARAM_STATUS, Message, OdometryDecoder
 from serial_scope.demo import DEMO_KINDS, write_demo_log
 from serial_scope.events import RX, DecodeError, Event, Notice, Sample, TextLine, TriggerFired
 from serial_scope.logfile import LogFormatError, LogReader, log_parts
@@ -426,6 +434,152 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- send --------------------------------------------------------------------------------
+
+EXIT_PARAM_REJECTED = 1
+EXIT_NO_REPLY = 4
+
+
+def _send_plan(args: argparse.Namespace) -> list[tuple[float, Command]]:
+    """The frames to send and when (seconds after the first)."""
+    commander = OdometryCommander(args.seq)
+    first = parse_action(list(args.odometry), commander)
+    plan = [(0.0, first)]
+    if args.hold:
+        if args.odometry[0] != "vel":
+            raise CommandError("--hold only applies to vel")
+        vx, vy, wz = (float(v) for v in args.odometry[1:4])
+        period = 1.0 / REPEAT_HZ
+        count = max(1, round(args.hold * REPEAT_HZ))
+        plan += [(i * period, commander.velocity(vx, vy, wz)) for i in range(1, count)]
+        plan.append((args.hold, commander.stop()))
+    return plan
+
+
+def _frame_line(t: float, command: Command) -> str:
+    return f"+{t:7.3f}s  > {command.text}  seq {command.seq}  [{command.frame.hex(' ')}]"
+
+
+def run_send(
+    transport: Transport | None,
+    args: argparse.Namespace,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+) -> int:
+    """``serial-scope send``: write odometry command frames and read the reply.
+
+    Exit status: 0 sent (and, for parameters, answered with status ok), 1 the firmware
+    rejected a parameter request, 2 bad arguments or the port failed, 4 no PARAM_VALUE
+    reply arrived in time, 130 interrupted (a stop frame is sent after a vel).
+    """
+    out = sys.stdout if out is None else out
+    err = sys.stderr if err is None else err
+    try:
+        plan = _send_plan(args)
+    except CommandError as exc:
+        err.write(f"error: {exc}\n")
+        return 2
+    if transport is None:
+        for t, command in plan:
+            out.write(_frame_line(t, command) + "\n")
+        return 0
+    first = plan[0][1]
+    is_motion = first.name == "velocity_command"
+    wait = args.wait if args.wait is not None else (0.2 if is_motion else 1.0)
+    decoder = OdometryDecoder()
+    session = Session(decoder)
+    if args.log:
+        session.start_logging(args.log, {"source": args.source, "command": "send"})
+    clock = _Clock(args.abs_time)
+    try:
+        transport.open()
+    except (TransportError, OSError) as exc:
+        err.write(f"error: {exc}\n")
+        session.close()
+        return 2
+    replies_before = decoder.counts["param_value"]
+    reply: Message | None = None
+    sent = 0
+    status = 0
+    start = time.monotonic()
+    try:
+        while True:
+            now = time.monotonic() - start
+            while sent < len(plan) and plan[sent][0] <= now:
+                t, command = plan[sent]
+                transport.write(command.frame)
+                session.record_tx(command.frame)
+                if sent in (0, len(plan) - 1):
+                    out.write(_frame_line(t, command) + "\n")
+                elif sent == 1:
+                    out.write(f"           (repeating every {1 / REPEAT_HZ:g} s)\n")
+                sent += 1
+            if reply is not None or (sent == len(plan) and now >= plan[-1][0] + wait):
+                break
+            due = plan[sent][0] - now if sent < len(plan) else 0.05
+            chunk = transport.read(max(0.0, min(0.05, due)))
+            if chunk is None:
+                continue
+            for event in session.process(chunk):
+                if isinstance(event, (TextLine, DecodeError)):
+                    out.write(format_event(event, clock) + "\n")
+            last = decoder.last_param_value
+            if (
+                first.param_id is not None
+                and last is not None
+                and decoder.counts["param_value"] > replies_before
+                and last.fields["id"] == first.param_id
+            ):
+                reply = last
+    except KeyboardInterrupt:
+        err.write("[interrupted]\n")
+        status = 130
+        if is_motion:
+            next_seq = plan[sent - 1][1].seq + 1 if sent else plan[0][1].seq
+            stop = OdometryCommander(next_seq).stop()
+            try:
+                transport.write(stop.frame)
+                session.record_tx(stop.frame)
+                err.write(_frame_line(time.monotonic() - start, stop) + "\n")
+            except (TransportError, OSError) as exc:
+                err.write(f"error: stop not sent ({exc}); the firmware watchdog will stop\n")
+    except (TransportError, OSError) as exc:
+        err.write(f"error: {exc}\n")
+        status = 2
+    finally:
+        transport.close()
+        session.close()
+    if status:
+        return status
+    if is_motion:
+        err.write(
+            f"sent {sent} frame(s); the protocol has no acknowledgement for velocity commands\n"
+        )
+        return 0
+    if reply is None:
+        err.write(f"no PARAM_VALUE reply within {wait:g} s\n")
+        return EXIT_NO_REPLY
+    code = int(reply.fields["status"])
+    if code != 0:
+        err.write(f"firmware rejected the request: {PARAM_STATUS.get(code, code)}\n")
+        return EXIT_PARAM_REJECTED
+    return 0
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        return run_send(None, args)
+    if not args.source:
+        print("error: SOURCE is required unless --dry-run is given", file=sys.stderr)
+        return 2
+    try:
+        transport = parse_source(args.source, args.baud)
+    except (ValueError, LogFormatError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return run_send(transport, args)
+
+
 def cmd_gui(args: argparse.Namespace) -> int:
     try:
         from serial_scope.gui import run_gui
@@ -540,6 +694,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.add_argument("--max-errors", type=int, metavar="N", help="exit 3 if more decode errors")
     p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser(
+        "send",
+        help="send a velocity or parameter command to encoder-odometry-firmware",
+        description="Send a command frame to encoder-odometry-firmware and print the reply. "
+        "WARNING: vel moves the motors. One vel command drives them until the firmware's "
+        "watchdog stops them (watchdog_ms, default 500 ms); --hold repeats it and then "
+        "sends stop.",
+    )
+    p.add_argument("source", nargs="?", help="COM5, /dev/ttyUSB0, tcp://host:port, loop://")
+    p.add_argument("-b", "--baud", type=int, default=115200, help="baud rate (default 115200)")
+    p.add_argument(
+        "--odometry",
+        nargs="+",
+        required=True,
+        metavar="WORD",
+        help="vel VX VY WZ (m/s, m/s, rad/s) | stop | get-param NAME | set-param NAME VALUE",
+    )
+    p.add_argument(
+        "--hold",
+        type=_positive_float,
+        default=0.0,
+        metavar="S",
+        help=f"vel only: repeat the command at {REPEAT_HZ:g} Hz for S seconds, then send stop",
+    )
+    p.add_argument(
+        "--wait",
+        type=_positive_float,
+        metavar="S",
+        help="read replies for S seconds after the last frame (default 1 for parameters, "
+        "0.2 otherwise)",
+    )
+    p.add_argument(
+        "--seq", type=int, default=0, help="sequence number of the first frame (default 0)"
+    )
+    p.add_argument("--log", metavar="FILE.sslog", help="record sent and received bytes")
+    p.add_argument("--abs-time", action="store_true", help="print wall-clock times")
+    p.add_argument("--dry-run", action="store_true", help="print the frames, send nothing")
+    p.set_defaults(func=cmd_send)
 
     p = sub.add_parser("decoders", help="list the available decoders")
     p.set_defaults(func=cmd_decoders)
