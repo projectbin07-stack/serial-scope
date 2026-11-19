@@ -719,7 +719,7 @@ class MainWindow:
             if " error " in line:
                 color = self.theme.error
             elif " notice " in line:
-                color = self.theme.palette[1]
+                color = self.theme.notice
             else:
                 color = self.theme.marker
             self.events_list.itemconfigure("end", foreground=color)

@@ -29,6 +29,7 @@ class Theme:
     select_bg: str
     error: str
     marker: str
+    notice: str
     palette: tuple[str, ...]
 
 
@@ -46,6 +47,7 @@ THEMES: dict[str, Theme] = {
         select_bg="#cfe3ff",
         error="#c62828",
         marker="#8250df",
+        notice="#9a6700",
         palette=(
             "#1f77b4",
             "#d62728",
@@ -70,6 +72,7 @@ THEMES: dict[str, Theme] = {
         select_bg="#264f78",
         error="#ff6b6b",
         marker="#c792ea",
+        notice="#e5c07b",
         palette=(
             "#61afef",
             "#e06c75",
