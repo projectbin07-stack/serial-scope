@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from serial_scope.app import AppController, UiUpdate
+from serial_scope.decoders.odometry import OdometryDecoder
 from serial_scope.demo import write_demo_log
 from serial_scope.logfile import LogReader
 from serial_scope.transport import FakeTransport, TransportError
@@ -181,7 +182,17 @@ def test_velocity_repeat_stop_and_parameters() -> None:
     from serial_scope.decoders.odometry import encode_frame
 
     reply = encode_frame("param_value", 9, {"id": 10, "status": 0, "value": 500.0})
+    version = encode_frame("param_value", 8, {"id": 22, "status": 0, "value": 1.0})
     ctl, fake, clock = _connected([])
+    # Nothing moves until the firmware has confirmed protocol version 1.
+    with pytest.raises(ValueError, match="asked the firmware for its protocol version"):
+        ctl.send_velocity(0.2, 0.0, 0.1, repeat=True)
+    fake.script.insert(0, version)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if any("protocol_version = 1" in r for r in ctl.poll().replies):
+            break
+        time.sleep(0.01)
     command = ctl.send_velocity(0.2, 0.0, 0.1, repeat=True)
     assert command.text.startswith("velocity vx=0.2")
     assert ctl.repeat_velocity == (0.2, 0.0, 0.1)
@@ -197,15 +208,17 @@ def test_velocity_repeat_stop_and_parameters() -> None:
     ctl.send_param_set("kp", 0.05)
     frames = _sent_frames(fake)
     assert [(name, seq) for name, seq, _ in frames] == [
-        ("velocity_command", 0),
+        ("param_get", 0),
         ("velocity_command", 1),
         ("velocity_command", 2),
         ("velocity_command", 3),
-        ("param_get", 4),
-        ("param_set", 5),
+        ("velocity_command", 4),
+        ("param_get", 5),
+        ("param_set", 6),
     ]
-    assert frames[3][2] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
-    assert frames[4][2] == {"id": 10}
+    assert frames[0][2] == {"id": 22}
+    assert frames[4][2] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
+    assert frames[5][2] == {"id": 10}
     counters = dict(ctl.counter_rows())
     assert int(counters["bytes sent"]) == len(fake.written)
     # The reply arrives as a decoded frame and is reported to the panel.
@@ -239,6 +252,12 @@ def test_repeat_stops_when_the_link_fails() -> None:
     while not ctl.connected and time.monotonic() < deadline:
         ctl.poll()
         time.sleep(0.01)
+    decoder = ctl.session.decoder
+    assert isinstance(decoder, OdometryDecoder)
+    decoder.protocol_version = 2
+    with pytest.raises(ValueError, match="protocol version 2, not 1"):
+        ctl.send_velocity(0.3, 0.0, 0.0)
+    decoder.protocol_version = 1
     ctl.send_velocity(0.3, 0.0, 0.0, repeat=True)
     clock.now += 0.2
     update = ctl.poll()

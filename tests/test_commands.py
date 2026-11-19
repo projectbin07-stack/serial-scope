@@ -152,8 +152,11 @@ def test_reply_for_another_parameter_is_not_the_answer() -> None:
     assert "no PARAM_VALUE reply within 0.05 s" in err.getvalue()
 
 
+VERSION_1 = encode_frame("param_value", 0, {"id": 22, "status": 0, "value": 1.0})
+
+
 def test_hold_repeats_the_command_then_stops(tmp_path: Path) -> None:
-    transport = FakeTransport()
+    transport = FakeTransport([VERSION_1])
     log = tmp_path / "send.sslog"
     out, err = io.StringIO(), io.StringIO()
     args = _args(
@@ -171,13 +174,15 @@ def test_hold_repeats_the_command_then_stops(tmp_path: Path) -> None:
         str(log),
     )
     assert run_send(transport, args, out, err) == 0
-    frames = _frames(bytes(transport.written))
-    assert [f.seq for f in frames] == [0, 1, 2, 3]
+    get_version, *frames = _frames(bytes(transport.written))
+    assert (get_version.name, get_version.seq, get_version.fields) == ("param_get", 0, {"id": 22})
+    assert [f.seq for f in frames] == [1, 2, 3, 4]
     assert [f.fields["vx"] for f in frames] == pytest.approx([0.2, 0.2, 0.2, 0.0])
     assert frames[-1].fields == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
     text = out.getvalue()
+    assert "PARAM_VALUE protocol_version = 1 (ok)" in text
     assert "(repeating every 0.1 s)" in text
-    assert "> stop (zero velocity)  seq 3" in text
+    assert "> stop (zero velocity)  seq 4" in text
     assert "sent 4 frame(s)" in err.getvalue()
     sent = [c.data for c in LogReader(log) if c.direction == "tx"]
     assert b"".join(sent) == bytes(transport.written)
@@ -191,7 +196,7 @@ class _InterruptingTransport(FakeTransport):
 def test_interrupt_during_vel_sends_stop() -> None:
     transport = _InterruptingTransport()
     err = io.StringIO()
-    args = _args("x", "--odometry", "vel", "0.3", "0", "0", "--hold", "5")
+    args = _args("x", "--odometry", "vel", "0.3", "0", "0", "--hold", "5", "--no-version-check")
     assert run_send(transport, args, io.StringIO(), err) == 130
     frames = _frames(bytes(transport.written))
     assert frames[0].fields["vx"] == pytest.approx(0.3)
@@ -229,3 +234,36 @@ def test_send_over_pyserial_loopback(capsys: pytest.CaptureFixture[str]) -> None
     assert "no PARAM_VALUE reply" in captured.err
     assert main(["send", "loop://", "--odometry", "stop"]) == 0
     assert "VELOCITY_COMMAND vx=0 vy=0 wz=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        ([], "no protocol_version reply within 0.05 s"),
+        (
+            [encode_frame("param_value", 0, {"id": 22, "status": 0, "value": 2.0})],
+            "firmware speaks protocol version 2, not 1",
+        ),
+        (
+            [encode_frame("param_value", 0, {"id": 22, "status": 1, "value": 0.0})],
+            "no protocol_version reply",
+        ),
+    ],
+)
+def test_velocity_is_not_sent_without_a_known_protocol_version(
+    monkeypatch: pytest.MonkeyPatch, script: list[bytes], message: str
+) -> None:
+    monkeypatch.setattr("serial_scope.cli.VERSION_TIMEOUT_S", 0.05)
+    transport = FakeTransport(list(script))
+    err = io.StringIO()
+    assert (
+        run_send(transport, _args("x", "--odometry", "vel", "1", "0", "0"), io.StringIO(), err) == 5
+    )
+    assert message in err.getvalue()
+    assert [f.name for f in _frames(bytes(transport.written))] == ["param_get"]  # no velocity
+
+
+def test_stop_and_parameters_skip_the_version_check() -> None:
+    transport = FakeTransport()
+    assert run_send(transport, _args("x", "--odometry", "stop"), io.StringIO(), io.StringIO()) == 0
+    assert [f.name for f in _frames(bytes(transport.written))] == ["velocity_command"]

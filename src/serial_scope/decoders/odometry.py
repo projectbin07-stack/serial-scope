@@ -25,6 +25,8 @@ from serial_scope.decoders.framing import CobsError, cobs_decode, cobs_encode, c
 from serial_scope.events import Event, Sample, TextLine
 
 PROTOCOL_VERSION = 1
+PROTOCOL_VERSION_PARAM = 22
+"""Read-only parameter holding the firmware's protocol version."""
 MAX_FRAME_BYTES = 72
 """Anything longer than this between two delimiters is a framing error."""
 WHEELS = ("fl", "fr", "rl", "rr")
@@ -249,6 +251,8 @@ class OdometryDecoder(CobsFrameDecoder):
         self.last_seq: int | None = None
         self.last_param_value: Message | None = None
         """The most recent PARAM_VALUE reply (the answer to a get or set)."""
+        self.protocol_version: int | None = None
+        """The firmware's protocol version, once it has answered a get of parameter 22."""
         self._clock = ClockUnwrapper(32, 1e-6)
 
     def decode_frame(self, t: float, raw: bytes) -> list[Event]:
@@ -265,6 +269,8 @@ class OdometryDecoder(CobsFrameDecoder):
         self.counts[msg.name] += 1
         if msg.name == "param_value":
             self.last_param_value = msg
+            if msg.fields["id"] == PROTOCOL_VERSION_PARAM and msg.fields["status"] == 0:
+                self.protocol_version = round(msg.fields["value"])
         events = message_to_events(msg, t)
         if "t_us" in msg.fields:
             # The 32-bit microsecond clock wraps every ~71.6 min.

@@ -16,6 +16,11 @@ from pathlib import Path
 from serial_scope.channels import DEFAULT_BUFFER
 from serial_scope.commands import REPEAT_HZ, Command, OdometryCommander
 from serial_scope.connection import CONNECTED, FINISHED, ReconnectingSource, StatusEvent
+from serial_scope.decoders.odometry import (
+    PROTOCOL_VERSION,
+    PROTOCOL_VERSION_PARAM,
+    OdometryDecoder,
+)
 from serial_scope.events import (
     INFO,
     MARK,
@@ -198,9 +203,30 @@ class AppController:
         self.session.record_tx(command.frame, self.clock())
         return command
 
+    def _check_protocol_version(self) -> None:
+        """Refuse to move motors until the firmware has confirmed protocol version 1.
+
+        The first attempt asks for parameter 22 and raises; once the reply has been
+        decoded, velocity commands go out (the protocol document asks a host not to
+        drive a firmware whose version it does not know).
+        """
+        active = self.session.active_decoder
+        version = active.protocol_version if isinstance(active, OdometryDecoder) else None
+        if version == PROTOCOL_VERSION:
+            return
+        if version is not None:
+            raise ValueError(
+                f"firmware speaks protocol version {version}, not {PROTOCOL_VERSION}; "
+                "velocity commands are disabled"
+            )
+        self._send_frame(self.commander.param_get(PROTOCOL_VERSION_PARAM))
+        raise ValueError("asked the firmware for its protocol version; send again after it replies")
+
     def send_velocity(self, vx: float, vy: float, wz: float, repeat: bool = False) -> Command:
         """Send one VELOCITY_COMMAND. With ``repeat`` it is re-sent at :data:`REPEAT_HZ`
-        from :meth:`poll` until :meth:`stop_motors`, a disconnect or a failed write."""
+        from :meth:`poll` until :meth:`stop_motors`, a disconnect or a failed write.
+        Raises ValueError until the firmware's protocol version is confirmed."""
+        self._check_protocol_version()
         command = self._send_frame(self.commander.velocity(vx, vy, wz))
         self.repeat_velocity = (vx, vy, wz) if repeat else None
         self._last_repeat = self.clock()

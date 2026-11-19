@@ -21,7 +21,13 @@ from serial_scope.commands import (
 )
 from serial_scope.connection import ReconnectingSource
 from serial_scope.decoders import available_decoders
-from serial_scope.decoders.odometry import PARAM_STATUS, Message, OdometryDecoder
+from serial_scope.decoders.odometry import (
+    PARAM_STATUS,
+    PROTOCOL_VERSION,
+    PROTOCOL_VERSION_PARAM,
+    Message,
+    OdometryDecoder,
+)
 from serial_scope.demo import DEMO_KINDS, write_demo_log
 from serial_scope.events import RX, DecodeError, Event, Notice, Sample, TextLine, TriggerFired
 from serial_scope.logfile import LogFormatError, LogReader, log_parts
@@ -438,11 +444,14 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 EXIT_PARAM_REJECTED = 1
 EXIT_NO_REPLY = 4
+EXIT_VERSION = 5
+VERSION_TIMEOUT_S = 1.0
 
 
-def _send_plan(args: argparse.Namespace) -> list[tuple[float, Command]]:
+def _send_plan(
+    args: argparse.Namespace, commander: OdometryCommander
+) -> list[tuple[float, Command]]:
     """The frames to send and when (seconds after the first)."""
-    commander = OdometryCommander(args.seq)
     first = parse_action(list(args.odometry), commander)
     plan = [(0.0, first)]
     if args.hold:
@@ -468,14 +477,24 @@ def run_send(
 ) -> int:
     """``serial-scope send``: write odometry command frames and read the reply.
 
+    Before a velocity command the firmware's protocol version (parameter 22) is read,
+    and nothing that moves the motors is sent unless it is the version this encoder
+    implements, as the protocol document asks of a host (``--no-version-check`` skips it).
+
     Exit status: 0 sent (and, for parameters, answered with status ok), 1 the firmware
     rejected a parameter request, 2 bad arguments or the port failed, 4 no PARAM_VALUE
-    reply arrived in time, 130 interrupted (a stop frame is sent after a vel).
+    reply arrived in time, 5 the protocol version was not confirmed, 130 interrupted (a
+    stop frame is sent after a vel).
     """
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
+    commander = OdometryCommander(args.seq)
+    check_version = (
+        transport is not None and args.odometry[:1] == ["vel"] and not args.no_version_check
+    )
     try:
-        plan = _send_plan(args)
+        version_get = commander.param_get(PROTOCOL_VERSION_PARAM) if check_version else None
+        plan = _send_plan(args, commander)
     except CommandError as exc:
         err.write(f"error: {exc}\n")
         return 2
@@ -503,7 +522,32 @@ def run_send(
     status = 0
     start = time.monotonic()
     clock.origin = time.time()  # event times count from the first frame sent
+
+    def pump(timeout: float) -> None:
+        chunk = transport.read(timeout)
+        if chunk is not None:
+            for event in session.process(chunk):
+                if isinstance(event, (TextLine, DecodeError)):
+                    out.write(format_event(event, clock) + "\n")
+
     try:
+        if version_get is not None:
+            transport.write(version_get.frame)
+            session.record_tx(version_get.frame)
+            out.write(_frame_line(0.0, version_get) + "\n")
+            while decoder.protocol_version is None and time.monotonic() - start < VERSION_TIMEOUT_S:
+                pump(0.05)
+            if decoder.protocol_version != PROTOCOL_VERSION:
+                found = decoder.protocol_version
+                reason = (
+                    f"no protocol_version reply within {VERSION_TIMEOUT_S:g} s"
+                    if found is None
+                    else f"firmware speaks protocol version {found}, not {PROTOCOL_VERSION}"
+                )
+                err.write(f"not sending a velocity command: {reason}\n")
+                status = EXIT_VERSION
+                return status
+            start = time.monotonic()
         while True:
             now = time.monotonic() - start
             while sent < len(plan) and plan[sent][0] <= now:
@@ -518,12 +562,7 @@ def run_send(
             if reply is not None or (sent == len(plan) and now >= plan[-1][0] + wait):
                 break
             due = plan[sent][0] - now if sent < len(plan) else 0.05
-            chunk = transport.read(max(0.0, min(0.05, due)))
-            if chunk is None:
-                continue
-            for event in session.process(chunk):
-                if isinstance(event, (TextLine, DecodeError)):
-                    out.write(format_event(event, clock) + "\n")
+            pump(max(0.0, min(0.05, due)))
             last = decoder.last_param_value
             if (
                 first.param_id is not None
@@ -734,6 +773,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", metavar="FILE.sslog", help="record sent and received bytes")
     p.add_argument("--abs-time", action="store_true", help="print wall-clock times")
     p.add_argument("--dry-run", action="store_true", help="print the frames, send nothing")
+    p.add_argument(
+        "--no-version-check",
+        action="store_true",
+        help="vel: do not ask for the firmware's protocol version first",
+    )
     p.set_defaults(func=cmd_send)
 
     p = sub.add_parser("decoders", help="list the available decoders")
