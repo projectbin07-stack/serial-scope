@@ -63,6 +63,20 @@ class DecodeError:
 
 
 @dataclass(frozen=True)
+class Notice:
+    """Something the device reported about itself that deserves attention.
+
+    For example a radio gateway's statistics showing new CRC errors or lost packets on
+    its radio link. The bytes on the serial line decoded fine, so this is not a
+    :class:`DecodeError` and does not count towards ``--max-errors``.
+    """
+
+    t: float
+    kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class TriggerFired:
     """A trigger condition became true."""
 
@@ -72,4 +86,4 @@ class TriggerFired:
     actions: tuple[str, ...] = field(default_factory=tuple)
 
 
-Event = TextLine | Sample | DecodeError | TriggerFired
+Event = TextLine | Sample | DecodeError | Notice | TriggerFired

@@ -15,6 +15,7 @@ from serial_scope.decoders.base import Decoder, LineDecoder
 from serial_scope.decoders.csvlines import CsvDecoder
 from serial_scope.decoders.ina219 import Ina219Decoder
 from serial_scope.decoders.jsonlines import JsonLinesDecoder
+from serial_scope.decoders.nrf24 import Nrf24GatewayDecoder
 from serial_scope.decoders.odometry import OdometryDecoder
 from serial_scope.decoders.plotter import PlotterDecoder
 from serial_scope.decoders.text import TextDecoder
@@ -63,6 +64,7 @@ def create_decoder(name: str = "auto") -> Decoder:
 
 register_decoder(Ina219Decoder, auto_rank=10)
 register_decoder(OdometryDecoder, auto_rank=20)
+register_decoder(Nrf24GatewayDecoder, auto_rank=25)
 register_decoder(JsonLinesDecoder, auto_rank=30)
 register_decoder(CsvDecoder, auto_rank=40)
 register_decoder(PlotterDecoder, auto_rank=50)

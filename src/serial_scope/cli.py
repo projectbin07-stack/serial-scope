@@ -15,7 +15,7 @@ from serial_scope import __version__
 from serial_scope.connection import ReconnectingSource
 from serial_scope.decoders import available_decoders
 from serial_scope.demo import DEMO_KINDS, write_demo_log
-from serial_scope.events import RX, DecodeError, Event, Sample, TextLine, TriggerFired
+from serial_scope.events import RX, DecodeError, Event, Notice, Sample, TextLine, TriggerFired
 from serial_scope.logfile import LogFormatError, LogReader, log_parts
 from serial_scope.ports import list_ports
 from serial_scope.session import Session
@@ -55,6 +55,8 @@ def format_event(event: Event, clock: _Clock) -> str:
         return f"{stamp}  {event.text}"
     if isinstance(event, DecodeError):
         return f"{stamp}  ! {event.kind}: {event.detail}"
+    if isinstance(event, Notice):
+        return f"{stamp}  ~ {event.kind}: {event.detail}"
     return f"{stamp}  * trigger {event.trigger}: {event.detail} [{', '.join(event.actions)}]"
 
 
@@ -179,11 +181,21 @@ def summary_text(session: Session) -> str:
     sequence = session.sequence_counts()
     if sequence:
         lines.append("sequence: " + ", ".join(f"{k} {v}" for k, v in sequence.items()))
+    link = session.link_counts()
+    if link:
+        lines.append(f"radio link (device totals): {_counts_text(link)}")
+    if totals.notices:
+        notices = ", ".join(f"{k} {v}" for k, v in sorted(totals.notices.items()))
+        lines.append(f"notices: {notices}")
     if session.markers:
         lines.append(f"{len(session.markers)} markers")
     if session.snapshots:
         lines.append("snapshots: " + ", ".join(str(p) for p in session.snapshots))
     return "\n".join(lines)
+
+
+def _counts_text(counts: dict[str, int]) -> str:
+    return ", ".join(f"{k} {v}" for k, v in counts.items())
 
 
 # -- commands ----------------------------------------------------------------------------
@@ -267,6 +279,8 @@ class LogStats:
     text_lines: int
     errors: dict[str, int]
     sequence: dict[str, int]
+    link: dict[str, int]
+    notices: dict[str, int]
     markers: list[dict[str, Any]]
     channels: list[ChannelStats] = field(default_factory=list)
 
@@ -327,6 +341,8 @@ def log_stats(path: str, decoder: str = "auto") -> LogStats:
         text_lines=session.totals.text_lines,
         errors=session.error_counts(),
         sequence=session.sequence_counts(),
+        link=session.link_counts(),
+        notices=dict(sorted(session.totals.notices.items())),
         markers=[{"t": m.t, "label": m.label} for m in session.markers],
         channels=channels,
     )
@@ -370,6 +386,10 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"errors      {errors}")
         if info.sequence:
             print("sequence    " + ", ".join(f"{k} {v}" for k, v in info.sequence.items()))
+        if info.link:
+            print(f"radio link  {_counts_text(info.link)}  (device totals)")
+        if info.notices:
+            print(f"notices     {_counts_text(info.notices)}")
         for marker in info.markers:
             print(f"marker      {_iso(marker['t'])}  {marker['label']}")
         if info.channels:

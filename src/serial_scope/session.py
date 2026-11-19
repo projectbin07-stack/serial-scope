@@ -17,9 +17,24 @@ from serial_scope.channels import DEFAULT_BUFFER, ChannelSet
 from serial_scope.csvexport import CsvExporter, write_snapshot
 from serial_scope.decoders import Decoder, create_decoder
 from serial_scope.decoders.auto import AutoDecoder
-from serial_scope.events import INFO, MARK, RX, TX, Chunk, DecodeError, Event, Sample, TriggerFired
+from serial_scope.events import (
+    INFO,
+    MARK,
+    RX,
+    TX,
+    Chunk,
+    DecodeError,
+    Event,
+    Notice,
+    Sample,
+    TriggerFired,
+)
 from serial_scope.logfile import LogWriter
 from serial_scope.triggers import TriggerSet
+
+SEQUENCE_KEYS = ("dropped", "lost", "restarts", "gateway_restarts")
+"""Decoder counters reported as sequence problems: frames missing by sequence number
+(``dropped`` / ``lost``) and device restarts."""
 
 
 @dataclass
@@ -38,6 +53,7 @@ class SessionTotals:
     first_t: float | None = None
     last_t: float | None = None
     errors: Counter[str] = field(default_factory=Counter)
+    notices: Counter[str] = field(default_factory=Counter)
 
 
 class Session:
@@ -95,6 +111,14 @@ class Session:
             self.csv = None
 
     @property
+    def active_decoder(self) -> Decoder | None:
+        """The decoder doing the work: the forced one, or auto's choice (None while detecting)."""
+        d = self.decoder
+        if isinstance(d, AutoDecoder):
+            return d.chosen
+        return d
+
+    @property
     def decoder_name(self) -> str:
         d = self.decoder
         if isinstance(d, AutoDecoder):
@@ -142,6 +166,8 @@ class Session:
                     self.csv.write(event)
             elif isinstance(event, DecodeError):
                 self.totals.errors[event.kind] += 1
+            elif isinstance(event, Notice):
+                self.totals.notices[event.kind] += 1
             elif not isinstance(event, TriggerFired):
                 self.totals.text_lines += 1
             for fired in self.triggers.evaluate(event):
@@ -204,7 +230,11 @@ class Session:
     def sequence_counts(self) -> dict[str, int]:
         """Frames missing by sequence number (``dropped`` / ``lost``) and device restarts."""
         counts = self.decoder.counts
-        return {k: counts[k] for k in ("dropped", "lost", "restarts") if counts.get(k)}
+        return {k: counts[k] for k in SEQUENCE_KEYS if counts.get(k)}
+
+    def link_counts(self) -> dict[str, int]:
+        """Link-quality counters reported by the device (empty for most formats)."""
+        return dict(self.decoder.link_counts)
 
     def close(self) -> None:
         self.stop_logging()

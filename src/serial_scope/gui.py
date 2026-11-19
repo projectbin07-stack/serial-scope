@@ -608,9 +608,13 @@ class MainWindow:
             self._add_channel(name)
         for line in update.events:
             self.events_list.insert("end", line)
-            self.events_list.itemconfigure(
-                "end", foreground=self.theme.error if " error " in line else self.theme.marker
-            )
+            if " error " in line:
+                color = self.theme.error
+            elif " notice " in line:
+                color = self.theme.palette[1]
+            else:
+                color = self.theme.marker
+            self.events_list.itemconfigure("end", foreground=color)
         if update.events:
             self.events_list.see("end")
         for _ in range(min(update.beeps, 3)):

@@ -84,6 +84,7 @@ class AutoDecoder(Decoder):
         self.chosen = decoder
         self.errors = decoder.errors
         self.counts = decoder.counts
+        self.link_counts = decoder.link_counts
         events = self._pending[decoder.name]
         self._pending.clear()
         return events

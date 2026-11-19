@@ -7,15 +7,23 @@ from typing import Any
 import pytest
 
 from serial_scope.decoders.base import Decoder
-from serial_scope.events import DecodeError, Event, Sample, TextLine
+from serial_scope.events import DecodeError, Event, Notice, Sample, TextLine
 
 DATA = Path(__file__).parent / "data"
 
 
-def load_vectors() -> dict[str, Any]:
-    with (DATA / "odometry_protocol_vectors.json").open(encoding="utf-8") as f:
+def _load_json(name: str) -> dict[str, Any]:
+    with (DATA / name).open(encoding="utf-8") as f:
         data: dict[str, Any] = json.load(f)
     return data
+
+
+def load_vectors() -> dict[str, Any]:
+    return _load_json("odometry_protocol_vectors.json")
+
+
+def load_nrf24_vectors() -> dict[str, Any]:
+    return _load_json("nrf24_link_vectors.json")
 
 
 def feed_split(decoder: Decoder, data: bytes, size: int, t0: float = 100.0) -> list[Event]:
@@ -41,6 +49,15 @@ def errors(events: list[Event]) -> list[DecodeError]:
     return [e for e in events if isinstance(e, DecodeError)]
 
 
+def notices(events: list[Event]) -> list[Notice]:
+    return [e for e in events if isinstance(e, Notice)]
+
+
 @pytest.fixture
 def vectors() -> dict[str, Any]:
     return load_vectors()
+
+
+@pytest.fixture
+def nrf24_vectors() -> dict[str, Any]:
+    return load_nrf24_vectors()

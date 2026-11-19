@@ -15,7 +15,17 @@ from pathlib import Path
 
 from serial_scope.channels import DEFAULT_BUFFER
 from serial_scope.connection import CONNECTED, FINISHED, ReconnectingSource, StatusEvent
-from serial_scope.events import INFO, MARK, RX, TX, Chunk, DecodeError, TriggerFired
+from serial_scope.events import (
+    INFO,
+    MARK,
+    RX,
+    TX,
+    Chunk,
+    DecodeError,
+    Notice,
+    TextLine,
+    TriggerFired,
+)
 from serial_scope.plotmodel import format_value
 from serial_scope.reader import ReaderThread
 from serial_scope.session import Session
@@ -216,8 +226,15 @@ class AppController:
     def _chunk(self, chunk: Chunk, update: UiUpdate) -> None:
         update.chunks += 1
         events = self.session.process(chunk)
+        active = self.session.active_decoder
+        binary = active is not None and active.binary
         if chunk.direction == RX:
-            if self.hex_mode:
+            if binary and not self.hex_mode:
+                # COBS frames rendered as text are noise; show what the frames said instead.
+                for event in events:
+                    if isinstance(event, TextLine):
+                        update.terminal.append((event.text + "\n", "rx"))
+            elif self.hex_mode:
                 lines = hexdump(chunk.data, self._hex_offset)
                 self._hex_offset += len(chunk.data)
                 update.terminal.append(("\n".join(lines) + "\n", "rx"))
@@ -233,6 +250,8 @@ class AppController:
         for event in events:
             if isinstance(event, DecodeError):
                 update.events.append(f"{_clock_str(event.t)}  error  {event.kind}: {event.detail}")
+            elif isinstance(event, Notice):
+                update.events.append(f"{_clock_str(event.t)}  notice  {event.kind}: {event.detail}")
             elif isinstance(event, TriggerFired):
                 update.events.append(
                     f"{_clock_str(event.t)}  trigger  {event.trigger}: {event.detail}"
@@ -269,6 +288,8 @@ class AppController:
         ]
         rows += [(f"error: {k}", str(v)) for k, v in self.session.error_counts().items()]
         rows += [(f"sequence: {k}", str(v)) for k, v in self.session.sequence_counts().items()]
+        rows += [(f"radio link: {k}", str(v)) for k, v in self.session.link_counts().items()]
+        rows += [(f"notices: {k}", str(v)) for k, v in sorted(totals.notices.items())]
         if self.source is not None:
             rows.append(("reconnects", str(max(0, self.source.connects - 1))))
             rows.append(("link drops", str(self.source.drops)))

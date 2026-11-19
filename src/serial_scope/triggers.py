@@ -7,9 +7,9 @@ Trigger kinds:
   ``hysteresis``.
 * edge ``rise:CH@LEVEL`` / ``fall:CH@LEVEL``: fires when consecutive samples cross the
   level upwards (from ``< LEVEL`` to ``>= LEVEL``) or downwards.
-* regex ``/PATTERN/`` or ``re:PATTERN``: fires on every text line that matches
-  (``re.search``). The ``re:`` form avoids Git Bash on Windows rewriting a leading ``/``
-  as a path.
+* regex ``/PATTERN/`` or ``re:PATTERN``: fires on every text line (or device notice,
+  such as a radio link report) that matches (``re.search``). The ``re:`` form avoids
+  Git Bash on Windows rewriting a leading ``/`` as a path.
 
 Actions: ``mark`` (add a marker to the log), ``beep`` (ring the bell in the GUI, BEL in
 the terminal), ``stop:N`` (stop logging N seconds later), ``snapshot`` (write the channel
@@ -29,7 +29,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from serial_scope.events import Event, Sample, TextLine, TriggerFired
+from serial_scope.events import Event, Notice, Sample, TextLine, TriggerFired
 
 ACTIONS = ("mark", "beep", "stop", "snapshot")
 _OPS: dict[str, Callable[[float, float], bool]] = {
@@ -131,12 +131,16 @@ class RegexTrigger(Trigger):
     _regex: re.Pattern[str] | None = field(default=None, repr=False)
 
     def check(self, event: Event) -> str | None:
-        if not isinstance(event, TextLine):
+        if isinstance(event, TextLine):
+            text = event.text
+        elif isinstance(event, Notice):
+            text = f"{event.kind}: {event.detail}"
+        else:
             return None
         if self._regex is None:
             self._regex = re.compile(self.pattern)
-        if self._regex.search(event.text):
-            return f"line matched /{self.pattern}/: {event.text.strip()[:120]}"
+        if self._regex.search(text):
+            return f"line matched /{self.pattern}/: {text.strip()[:120]}"
         return None
 
 
