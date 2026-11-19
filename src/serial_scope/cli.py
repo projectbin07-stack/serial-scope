@@ -544,6 +544,7 @@ def run_send(
                     if found is None
                     else f"firmware speaks protocol version {found}, not {PROTOCOL_VERSION}"
                 )
+                out.flush()
                 err.write(f"not sending a velocity command: {reason}\n")
                 status = EXIT_VERSION
                 return status
@@ -572,6 +573,7 @@ def run_send(
             ):
                 reply = last
     except KeyboardInterrupt:
+        out.flush()
         err.write("[interrupted]\n")
         status = 130
         if is_motion:
