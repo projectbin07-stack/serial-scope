@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-19
+
+### Added
+
+- `nrf24` decoder for the USB packets of the nrf24-telemetry-link gateway (COBS + CRC-16,
+  bodies up to 255 bytes) and the battery, odometry, IMU, key/value and command messages
+  inside them, with channels in SI-style units. Auto-detection tells it apart from the
+  encoder-odometry-firmware frames, which share its packet layout.
+- Radio link quality: the gateway's statistics become `link.*` channels; the latest CRC
+  error, malformed, duplicate, loss, retry, failure and resync totals appear in the CLI
+  summary, `stats` and the GUI's Stats tab; increases are reported as a new kind of event,
+  a *notice*, shown in the CLI (`~ link: ...`) and the GUI's errors list and matched by
+  regex triggers. Notices do not count as decode errors.
+- `serial-scope send SOURCE --odometry vel VX VY WZ | stop | get-param NAME |
+  set-param NAME VALUE` for encoder-odometry-firmware, with `--hold` (repeat at 10 Hz, then
+  stop), `--dry-run`, `--log` and a protocol-version check before anything that moves
+  motors. The frames match the firmware's published vectors byte for byte.
+- GUI command panel for encoder-odometry-firmware (velocity with optional 10 Hz repeat, a
+  STOP button, parameter get / set), shown while the odometry decoder is in use.
+- Synthetic `nrf24` demo log (`serial-scope demo --kind nrf24`) and a screenshot of it.
+- README safety notes for velocity commands.
+
+### Changed
+
+- The terminal shows decoded text instead of frame bytes for the binary formats (hex view
+  still shows the bytes).
+- The COBS frame splitting and 32-bit clock unwrapping of the odometry decoder moved into a
+  shared `CobsFrameDecoder` base.
+- The Tk smoke tests share one Tk interpreter.
+
+### Not done
+
+- Nothing in this release has been run against real hardware; in particular the command
+  path has never driven a motor.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added
@@ -31,4 +66,5 @@ All notable changes to this project are documented here. The format follows
 - CLI: `list`, `monitor`, `replay`, `stats`, `decoders`, `demo`, `gui`.
 - Synthetic demo logs for every supported format.
 
+[0.2.0]: https://github.com/projectbin07-stack/serial-scope/releases/tag/v0.2.0
 [0.1.0]: https://github.com/projectbin07-stack/serial-scope/releases/tag/v0.1.0

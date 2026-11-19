@@ -35,6 +35,9 @@ Linux, run it with `xvfb-run -a pytest`.
   counters. Errors are counted and reported, never dropped silently.
 - If a format comes from another project, copy its reference vectors into `tests/data/` and
   record where they came from in `tests/data/SOURCES.md`.
+- Anything that sends bytes to a device (like `commands.py`) must be checked byte for byte
+  against that project's own vectors, and anything that can move a motor must have a stop
+  path and must not be described as tested on hardware unless it was.
 - Do not describe anything as tested on hardware unless you ran it on hardware; say which
   board, adapter and OS.
 - Keep commits small with imperative messages (`Add ...`, `Fix ...`).
