@@ -20,7 +20,7 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
-from serial_scope.decoders.base import Decoder
+from serial_scope.decoders.cobsframes import ClockUnwrapper, CobsFrameDecoder
 from serial_scope.decoders.framing import CobsError, cobs_decode, cobs_encode, crc16_ccitt_false
 from serial_scope.events import Event, Sample, TextLine
 
@@ -239,60 +239,17 @@ def message_to_events(msg: Message, t: float) -> list[Event]:
     ]
 
 
-class OdometryDecoder(Decoder):
+class OdometryDecoder(CobsFrameDecoder):
     name = "odometry"
     description = "encoder-odometry-firmware binary frames: COBS + CRC-16/CCITT-FALSE"
+    max_frame = MAX_FRAME_BYTES
 
     def __init__(self) -> None:
         super().__init__()
-        self._buf = bytearray()
-        self._t_start: float | None = None
-        self._overlong = False
-        self._preview = b""
         self.last_seq: int | None = None
-        self._t_offset_us = 0
-        self._last_t_us: int | None = None
+        self._clock = ClockUnwrapper(32, 1e-6)
 
-    def feed(self, data: bytes, t: float) -> list[Event]:
-        events: list[Event] = []
-        start = 0
-        n = len(data)
-        while start < n:
-            end = data.find(b"\x00", start)
-            piece = data[start:] if end < 0 else data[start:end]
-            if piece and self._t_start is None:
-                self._t_start = t
-            if not self._overlong:
-                self._buf += piece
-                if len(self._buf) > MAX_FRAME_BYTES:
-                    self._overlong = True
-                    self._preview = bytes(self._buf[:24])
-                    self._buf.clear()
-            if end < 0:
-                break
-            frame_t = self._t_start if self._t_start is not None else t
-            events.extend(self._frame(frame_t))
-            start = end + 1
-        return events
-
-    def _frame(self, t: float) -> list[Event]:
-        raw = bytes(self._buf)
-        overlong = self._overlong
-        self._buf.clear()
-        self._overlong = False
-        self._t_start = None
-        if overlong:
-            return [
-                self.error(
-                    t,
-                    "overlong",
-                    f"more than {MAX_FRAME_BYTES} bytes between delimiters"
-                    f" (starts {self._preview!r})",
-                    self._preview,
-                )
-            ]
-        if not raw:
-            return []  # back-to-back delimiters carry nothing
+    def decode_frame(self, t: float, raw: bytes) -> list[Event]:
         try:
             msg = decode_packet(cobs_decode(raw))
         except CobsError as exc:
@@ -306,20 +263,10 @@ class OdometryDecoder(Decoder):
         self.counts[msg.name] += 1
         events = message_to_events(msg, t)
         if "t_us" in msg.fields:
-            device_t = self._unwrap(int(msg.fields["t_us"]))
+            # The 32-bit microsecond clock wraps every ~71.6 min.
+            device_t = self._clock(int(msg.fields["t_us"]))
             events = [
                 Sample(e.t, e.values, device_t, e.source) if isinstance(e, Sample) else e
                 for e in events
             ]
         return events
-
-    def _unwrap(self, t_us: int) -> float:
-        """Extend the 32-bit microsecond clock across wraparound (every ~71.6 min)."""
-        last = self._last_t_us
-        if last is not None and t_us < last:
-            if last - t_us > 2**31:
-                self._t_offset_us += 2**32
-            else:
-                self._t_offset_us = 0  # clock went backwards: the board restarted
-        self._last_t_us = t_us
-        return (t_us + self._t_offset_us) / 1e6

@@ -62,10 +62,15 @@ class Decoder(ABC):
 
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
+    binary: ClassVar[bool] = False
+    """True for binary formats, whose raw bytes are not worth showing as text."""
 
     def __init__(self) -> None:
         self.errors: Counter[str] = Counter()
         self.counts: Counter[str] = Counter()
+        # Link-quality counters the device reports about itself (a radio gateway's CRC
+        # errors, losses and retries), latest values. Updated in place, never replaced.
+        self.link_counts: dict[str, int] = {}
 
     @abstractmethod
     def feed(self, data: bytes, t: float) -> list[Event]:
