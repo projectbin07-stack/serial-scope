@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,23 +23,36 @@ if TYPE_CHECKING:
 tk = pytest.importorskip("tkinter")
 
 
-def _make_root() -> object:
+@pytest.fixture(scope="module")
+def tk_app() -> Iterator[Any]:
+    """One Tk interpreter for the module; each test opens its window as a Toplevel.
+
+    Creating and destroying several Tk interpreters in one process occasionally failed
+    on Windows with "Can't find a usable init.tcl" (a file read error); one interpreter
+    avoids that and is how the application itself runs.
+    """
     try:
-        return tk.Tk()
+        app = tk.Tk()
     except tk.TclError as exc:  # no display
         if os.environ.get("SERIAL_SCOPE_REQUIRE_GUI"):
             raise  # CI sets this so the test cannot silently skip there
         pytest.skip(f"Tk cannot open a display: {exc}")
+    app.withdraw()
+    yield app
+    app.destroy()
 
 
-def test_main_window_replays_demo(tmp_path: Path) -> None:
+def _make_root(app: Any) -> Any:
+    return tk.Toplevel(app)
+
+
+def test_main_window_replays_demo(tmp_path: Path, tk_app: Any) -> None:
     from serial_scope.app import AppController
     from serial_scope.gui import MainWindow
 
     log = tmp_path / "demo.sslog"
     write_demo_log(log, "plotter", seconds=4)
-    root = _make_root()
-    assert isinstance(root, tk.Tk)
+    root = _make_root(tk_app)
     root.geometry("1000x700")
     controller = AppController(snapshot_dir=tmp_path)
     window = MainWindow(root, controller, "dark")
@@ -101,14 +115,13 @@ def _replay_to_end(root: Any, window: MainWindow, controller: AppController, log
     root.update()
 
 
-def test_odometry_command_panel_appears_and_refuses_replays(tmp_path: Path) -> None:
+def test_odometry_command_panel_appears_and_refuses_replays(tmp_path: Path, tk_app: Any) -> None:
     from serial_scope.app import AppController
     from serial_scope.gui import MainWindow
 
     log = tmp_path / "odo.sslog"
     write_demo_log(log, "odometry", seconds=3)
-    root = _make_root()
-    assert isinstance(root, tk.Tk)
+    root = _make_root(tk_app)
     controller = AppController(snapshot_dir=tmp_path)
     window = MainWindow(root, controller, "light")
     try:
@@ -135,14 +148,13 @@ def test_odometry_command_panel_appears_and_refuses_replays(tmp_path: Path) -> N
         window.close()
 
 
-def test_nrf24_gateway_replay_fills_link_counters(tmp_path: Path) -> None:
+def test_nrf24_gateway_replay_fills_link_counters(tmp_path: Path, tk_app: Any) -> None:
     from serial_scope.app import AppController
     from serial_scope.gui import MainWindow
 
     log = tmp_path / "nrf24.sslog"
     write_demo_log(log, "nrf24", seconds=6)
-    root = _make_root()
-    assert isinstance(root, tk.Tk)
+    root = _make_root(tk_app)
     controller = AppController(snapshot_dir=tmp_path)
     window = MainWindow(root, controller, "dark")
     try:

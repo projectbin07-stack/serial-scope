@@ -46,7 +46,9 @@ SPEEDS = ("0.5", "1", "2", "4", "10", "max")
 
 
 class MainWindow:
-    def __init__(self, root: tk.Tk, controller: AppController, theme: str = "light") -> None:
+    def __init__(
+        self, root: tk.Tk | tk.Toplevel, controller: AppController, theme: str = "light"
+    ) -> None:
         self.root = root
         self.ctl = controller
         self.theme: Theme = THEMES[theme]
@@ -246,7 +248,7 @@ class MainWindow:
         status = ttk.Label(root, textvariable=self.status_var, anchor="w", padding=(8, 3))
         status.grid(row=3, column=0, sticky="ew")
 
-    def _build_command_panel(self, root: tk.Tk) -> None:
+    def _build_command_panel(self, root: tk.Tk | tk.Toplevel) -> None:
         """Velocity and parameter commands for encoder-odometry-firmware.
 
         Shown only while the odometry decoder is in use (see :meth:`sync_command_panel`).
