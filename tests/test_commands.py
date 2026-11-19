@@ -119,7 +119,7 @@ def _frames(data: bytes) -> list[Any]:
 def test_dry_run_prints_the_frames(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["send", "--dry-run", "--seq", "2", "--odometry", "get-param", "kp"]) == 0
     out = capsys.readouterr().out
-    assert out.strip() == "+  0.000s  > get kp  seq 2  [08 01 05 02 01 01 68 4a 00]"
+    assert out.strip() == "+    0.000s  > get kp  seq 2  [08 01 05 02 01 01 68 4a 00]"
 
 
 def test_param_get_reads_the_reply() -> None:

@@ -457,7 +457,7 @@ def _send_plan(args: argparse.Namespace) -> list[tuple[float, Command]]:
 
 
 def _frame_line(t: float, command: Command) -> str:
-    return f"+{t:7.3f}s  > {command.text}  seq {command.seq}  [{command.frame.hex(' ')}]"
+    return f"+{t:9.3f}s  > {command.text}  seq {command.seq}  [{command.frame.hex(' ')}]"
 
 
 def run_send(
@@ -502,6 +502,7 @@ def run_send(
     sent = 0
     status = 0
     start = time.monotonic()
+    clock.origin = time.time()  # event times count from the first frame sent
     try:
         while True:
             now = time.monotonic() - start
@@ -512,7 +513,7 @@ def run_send(
                 if sent in (0, len(plan) - 1):
                     out.write(_frame_line(t, command) + "\n")
                 elif sent == 1:
-                    out.write(f"           (repeating every {1 / REPEAT_HZ:g} s)\n")
+                    out.write(f"             (repeating every {1 / REPEAT_HZ:g} s)\n")
                 sent += 1
             if reply is not None or (sent == len(plan) and now >= plan[-1][0] + wait):
                 break
@@ -547,6 +548,7 @@ def run_send(
         err.write(f"error: {exc}\n")
         status = 2
     finally:
+        out.flush()
         transport.close()
         session.close()
     if status:
