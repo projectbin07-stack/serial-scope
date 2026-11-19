@@ -248,3 +248,26 @@ def test_repeat_stops_when_the_link_fails() -> None:
     with pytest.raises(ValueError):
         ctl.stop_motors()
     ctl.close()
+
+
+def test_nrf24_replay_shows_decoded_text_notices_and_link_counters(tmp_path: Path) -> None:
+    log = tmp_path / "nrf24.sslog"
+    write_demo_log(log, "nrf24", seconds=16)
+    ctl = AppController()
+    ctl.open_replay(log, speed=0)
+    updates = _poll_until_finished(ctl)
+    terminal = "".join(text for u in updates for text, _ in u.terminal)
+    # Decoded text instead of COBS bytes: the gateway's log line and the command results.
+    assert "[gateway] gateway ready\n" in terminal
+    assert "COMMAND_RESULT link_seq=13 NOT delivered\n" in terminal
+    events = [line for u in updates for line in u.events]
+    assert any("notice  link: radio: crc_errors +" in line for line in events)
+    assert any("notice  link: gateway: command with link seq 13" in line for line in events)
+    assert any("error  crc" in line for line in events)
+    counters = dict(ctl.counter_rows())
+    assert counters["decoder"] == "auto (nrf24)"
+    assert counters["radio link: reliable_failed"] == "1"
+    assert counters["sequence: lost"] == "2"  # the corrupted packet and the dropped one
+    assert int(counters["notices: link"]) >= 5
+    assert ctl.command_target is None
+    ctl.close()

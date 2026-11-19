@@ -52,7 +52,7 @@ jobs:
           serial-scope --version
           serial-scope decoders
           serial-scope list
-          for kind in plotter ina219 odometry jsonl csv; do
+          for kind in plotter ina219 odometry nrf24 jsonl csv; do
             serial-scope demo "demo-$kind.sslog" --kind "$kind" --seconds 5
             serial-scope stats "demo-$kind.sslog"
           done
@@ -60,6 +60,10 @@ jobs:
           test "$(wc -l < out.csv)" -gt 200
           serial-scope monitor loop:// --send 'a:1,b:2\n' --duration 0.5 --log loop.sslog
           serial-scope stats loop.sslog --json
+          serial-scope stats demo-nrf24.sslog | grep "decoder     auto (nrf24)"
+          # Command frames must equal encoder-odometry-firmware's published vector
+          serial-scope send --dry-run --odometry vel 0.5 0 0 | grep "03 01 01 02 0c 01 01 02 3f 01 01 01 01 01 01 01 03 73 0e 00"
+          serial-scope send loop:// --odometry stop
           set +e
           serial-scope replay demo-odometry.sslog --show none --max-errors 0
           test $? -eq 3

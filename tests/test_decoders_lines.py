@@ -248,3 +248,52 @@ def test_auto_decides_after_time_limit_on_slow_stream() -> None:
     events = auto.feed(b"v:3\n", 3.5)
     assert auto.chosen is not None and auto.chosen.name == "plotter"
     assert len(samples(events)) == 3
+
+
+# -- auto-detection between the two COBS-framed formats ---------------------------------
+# encoder-odometry-firmware and the nrf24-telemetry-link gateway share the packet layout
+# (version, type/kind, seq, length, body, CRC-16), so each decoder must reject the other.
+
+
+def _demo_bytes(kind: str, seconds: float = 6.0) -> bytes:
+    return b"".join(data for _, data in GENERATORS[kind](seconds))
+
+
+@pytest.mark.parametrize(("kind", "other"), [("odometry", "nrf24"), ("nrf24", "odometry")])
+def test_binary_formats_reject_each_other(kind: str, other: str) -> None:
+    data = _demo_bytes(kind)
+    wrong = create_decoder(other)
+    events = wrong.feed(data, 1.0) + wrong.flush(2.0)
+    assert samples(events) == []
+    assert sum(wrong.errors.values()) > 50
+
+
+@pytest.mark.parametrize("kind", ["odometry", "nrf24"])
+@pytest.mark.parametrize("offset", [0, 1, 7, 33])
+def test_auto_detects_binary_format_joined_mid_stream(kind: str, offset: int) -> None:
+    data = _demo_bytes(kind)[offset:]
+    auto = create_decoder("auto")
+    assert isinstance(auto, AutoDecoder)
+    feed_split(auto, data, 17)
+    assert auto.chosen is not None and auto.chosen.name == kind
+
+
+def test_auto_detects_both_projects_vector_files() -> None:
+    from conftest import load_nrf24_vectors, load_vectors
+    from serial_scope.decoders.nrf24 import encode_wire
+
+    odo = b"".join(bytes.fromhex(c["frame"]) for c in load_vectors()["messages"])
+    auto = create_decoder("auto")
+    assert isinstance(auto, AutoDecoder)
+    feed_split(auto, odo, 5)
+    assert auto.chosen is not None and auto.chosen.name == "odometry"
+
+    vectors = load_nrf24_vectors()
+    gateway = b"".join(
+        encode_wire(1, seq, b"\x01\x01\x01" + bytes.fromhex(c["hex"]))
+        for seq, c in enumerate(vectors["messages"])
+    ) + b"".join(bytes.fromhex(c["wire"]) for c in vectors["serial_frames"])
+    auto = create_decoder("auto")
+    assert isinstance(auto, AutoDecoder)
+    feed_split(auto, gateway, 5)
+    assert auto.chosen is not None and auto.chosen.name == "nrf24"

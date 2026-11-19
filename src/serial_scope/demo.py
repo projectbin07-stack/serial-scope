@@ -13,13 +13,15 @@ import math
 import random
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
+from serial_scope.decoders import nrf24
 from serial_scope.decoders.ina219 import encode_bm1
 from serial_scope.decoders.odometry import encode_frame
 from serial_scope.events import RX, Chunk
 from serial_scope.logfile import LogWriter
 
-DEMO_KINDS = ("plotter", "ina219", "odometry", "jsonl", "csv")
+DEMO_KINDS = ("plotter", "ina219", "odometry", "nrf24", "jsonl", "csv")
 DEMO_START = 1_763_550_000.0  # fixed epoch time so demo output is reproducible
 
 Record = tuple[float, bytes]  # (seconds since start, bytes the device wrote)
@@ -158,6 +160,127 @@ def odometry_records(seconds: float = 20.0, seed: int = 3) -> list[Record]:
     return records
 
 
+def nrf24_records(seconds: float = 20.0, seed: int = 6) -> list[Record]:
+    """nrf24-telemetry-link gateway on USB: a robot node's telemetry relayed over radio.
+
+    The node sends odometry and IMU messages at 10 Hz, battery at 1 Hz and a key/value
+    status every 5 s on the best-effort channel; the gateway forwards each message it
+    receives and its link statistics once a second. About 2 % of radio messages are
+    lost (and counted by the gateway), a few radio frames fail their CRC, a reliable
+    command is acknowledged after one retry at 8 s and fails after all its attempts at
+    14 s. On the USB side one packet has a flipped bit and one is missing. All of it is
+    computed, not recorded.
+    """
+    rng = random.Random(seed)
+    records: list[Record] = []
+    serial_seq = 0
+    hops = (54, 36, 18, 2, 38, 74, 44, 42)  # the protocol's default hop sequence
+    stats = dict.fromkeys(nrf24.STATS_FIELDS, 0)
+    stats.update(frames_received=8200, delivered_unreliable=8105, hop_locked=1)
+
+    def packet(t: float, kind: int, body: bytes, corrupt: bool = False, drop: bool = False) -> None:
+        nonlocal serial_seq
+        wire = nrf24.encode_wire(kind, serial_seq, body)
+        serial_seq = (serial_seq + 1) & 0xFF
+        if corrupt:
+            wire = wire[:9] + bytes([wire[9] ^ 0x20]) + wire[10:]
+        if not drop:
+            records.append((t, wire))
+
+    def relay(t: float, name: str, fields: dict[str, Any], **kw: bool) -> None:
+        stats["frames_received"] += 1
+        if rng.random() < 0.02:  # lost on the radio: the gateway sees a sequence gap
+            stats["unreliable_lost"] += 1
+            return
+        if rng.random() < 0.01:  # a radio frame that failed its CRC, then the next one
+            stats["crc_errors"] += 1
+            stats["frames_received"] += 1
+        stats["delivered_unreliable"] += 1
+        flags = 1 if rng.random() < 0.9 else 0  # RPD: received power above -64 dBm
+        body = bytes((1, 1, flags)) + nrf24.encode_message(name, fields)
+        packet(t, 0x01, body, **kw)
+
+    packet(0.0, 0x04, b"gateway ready")
+    x = y = theta = 0.0
+    charge_uah = 0.0
+    t = 0.1
+    step = 0
+    while t < seconds:
+        ramp = min(1.0, t / 2.0)
+        v, w = 0.25 * ramp, 0.35 * ramp
+        theta = math.remainder(theta + w * 0.1, 2 * math.pi)
+        x += v * math.cos(theta) * 0.1
+        y += v * math.sin(theta) * 0.1
+        t_ms = 5000 + int(t * 1000)
+        odo = {
+            "t_ms": t_ms,
+            "x_mm": round(x * 1000),
+            "y_mm": round(y * 1000),
+            "theta_mrad": round(theta * 1000),
+            "v_mm_s": round(v * 1000 + rng.gauss(0, 4)),
+            "w_mrad_s": round(w * 1000 + rng.gauss(0, 6)),
+        }
+        relay(t, "odometry", odo, corrupt=step == 63)
+        imu = {
+            "t_ms": t_ms + 2,
+            "accel_mg": [
+                round(rng.gauss(0, 12)),
+                round(v * w / 9.81 * 1000 + rng.gauss(0, 12)),
+                round(1000 + rng.gauss(0, 8)),
+            ],
+            "gyro_cdps": [
+                round(rng.gauss(0, 20)),
+                round(rng.gauss(0, 20)),
+                round(math.degrees(w) * 100 + rng.gauss(0, 30)),
+            ],
+            "temp_cc": round(3150 + 8 * t + rng.gauss(0, 3)),
+        }
+        relay(t + 0.004, "imu", imu, drop=step == 121)
+        if step % 10 == 5:
+            current_ua = round(620_000 + 450_000 * ramp + rng.gauss(0, 8000))
+            bus_mv = round(7820 - 6 * t - current_ua * 0.00012 + rng.gauss(0, 3))
+            charge_uah += current_ua / 3600
+            battery = {
+                "bus_mv": bus_mv,
+                "current_ua": current_ua,
+                "power_uw": bus_mv * current_ua // 1000,
+                "charge_uah": round(charge_uah),
+                "soc_permille": 812 - round(t / 2),
+                "flags": 0,
+            }
+            relay(t + 0.008, "battery", battery)
+        if step % 50 == 7:
+            entries = [
+                {"key": "period_ms", "type": "int", "value": 100},
+                {"key": "pa_dbm", "type": "int", "value": -6},
+                {"key": "imu_ok", "type": "bool", "value": True},
+                {"key": "fw", "type": "string", "value": "demo"},
+            ]
+            relay(t + 0.012, "key_value", {"entries": entries})
+        if step == 80:  # a reliable command: delivered after one retry
+            stats["reliable_sent"] += 1
+            stats["reliable_retries"] += 1
+            stats["reliable_acked"] += 1
+            packet(t + 0.03, 0x03, bytes((12, 1)))
+        if step == 140:  # a reliable command that used up its attempts
+            stats["reliable_sent"] += 1
+            stats["reliable_retries"] += 7
+            stats["reliable_failed"] += 1
+            stats["resyncs"] += 1
+            packet(t + 0.03, 0x03, bytes((13, 0)))
+        if step % 10 == 9:
+            second = step // 10
+            stats["uptime_ms"] = 30_000 + int(t * 1000)
+            stats["hop_index"] = second % len(hops)
+            stats["channel"] = hops[second % len(hops)]
+            stats["rpd_percent"] = 88 + rng.randint(-4, 4)
+            body = bytes(nrf24.encode_stats(stats))
+            packet(t + 0.05, 0x02, body)
+        t += 0.1
+        step += 1
+    return records
+
+
 def jsonl_records(seconds: float = 20.0, seed: int = 4) -> list[Record]:
     """An environment sensor printing ArduinoJson objects at 10 Hz."""
     rng = random.Random(seed)
@@ -194,6 +317,7 @@ GENERATORS = {
     "plotter": plotter_records,
     "ina219": ina219_records,
     "odometry": odometry_records,
+    "nrf24": nrf24_records,
     "jsonl": jsonl_records,
     "csv": csv_records,
 }

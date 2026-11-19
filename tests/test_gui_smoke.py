@@ -133,3 +133,31 @@ def test_odometry_command_panel_appears_and_refuses_replays(tmp_path: Path) -> N
         assert not window.command_panel_shown
     finally:
         window.close()
+
+
+def test_nrf24_gateway_replay_fills_link_counters(tmp_path: Path) -> None:
+    from serial_scope.app import AppController
+    from serial_scope.gui import MainWindow
+
+    log = tmp_path / "nrf24.sslog"
+    write_demo_log(log, "nrf24", seconds=6)
+    root = _make_root()
+    assert isinstance(root, tk.Tk)
+    controller = AppController(snapshot_dir=tmp_path)
+    window = MainWindow(root, controller, "dark")
+    try:
+        window.speed_var.set("max")
+        _replay_to_end(root, window, controller, log)
+        assert not window.command_panel_shown
+        assert "odom.x" in window.channel_widgets
+        assert "link.crc_errors" in window.channel_widgets
+        counters = {
+            window.counter_tree.item(i, "text"): window.counter_tree.item(i, "values")[0]
+            for i in window.counter_tree.get_children()
+        }
+        assert counters["decoder"] == "auto (nrf24)"
+        assert "radio link: crc_errors" in counters
+        assert "[gateway]" in window.text.get("1.0", "end")
+        window.draw_plot()
+    finally:
+        window.close()

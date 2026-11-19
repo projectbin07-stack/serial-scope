@@ -177,6 +177,11 @@ def decode_packet(packet: bytes) -> GatewayPacket:
     return GatewayPacket(packet[1], packet[2], bytes(packet[4:-2]))
 
 
+def encode_stats(stats: dict[str, int]) -> bytes:
+    """Build a ``link_stats`` body from a dict with every name in :data:`STATS_FIELDS`."""
+    return struct.pack(STATS_FORMAT, *(stats[name] for name in STATS_FIELDS))
+
+
 # -- application messages ------------------------------------------------------------------
 
 
