@@ -231,7 +231,9 @@ def test_send_over_pyserial_loopback(capsys: pytest.CaptureFixture[str]) -> None
     assert code == 4
     captured = capsys.readouterr()
     assert "PARAM_GET kp" in captured.out
-    assert "no PARAM_VALUE reply" in captured.err
+    assert (
+        "no PARAM_VALUE reply within 0.1 s (port opened at 921600 baud, the default" in captured.err
+    )
     assert main(["send", "loop://", "--odometry", "stop"]) == 0
     assert "VELOCITY_COMMAND vx=0 vy=0 wz=0" in capsys.readouterr().out
 
@@ -267,3 +269,17 @@ def test_stop_and_parameters_skip_the_version_check() -> None:
     transport = FakeTransport()
     assert run_send(transport, _args("x", "--odometry", "stop"), io.StringIO(), io.StringIO()) == 0
     assert [f.name for f in _frames(bytes(transport.written))] == ["velocity_command"]
+
+
+def test_missing_version_reply_names_the_baud_rate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Before 0.3.0 send opened the port at 115200 although the firmware runs at 921600 or
+    # 460800, and the only symptom was this message, without any mention of the baud rate.
+    monkeypatch.setattr("serial_scope.cli.VERSION_TIMEOUT_S", 0.05)
+    assert main(["send", "loop://", "--odometry", "vel", "0.2", "0", "0"]) == 5
+    err = capsys.readouterr().err
+    assert "no protocol_version reply within 0.05 s (port opened at 921600 baud, the default" in err
+    assert "460800 on NUCLEO-F446RE (pass -b 460800 there)" in err
+    assert main(["send", "loop://", "-b", "460800", "--odometry", "vel", "0.2", "0", "0"]) == 5
+    assert "460800 baud, from -b" in capsys.readouterr().err

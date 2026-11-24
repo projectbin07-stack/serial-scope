@@ -8,7 +8,7 @@ import pytest
 
 from conftest import DATA
 from serial_scope import __version__
-from serial_scope.cli import format_event, log_stats, main
+from serial_scope.cli import build_parser, format_event, log_stats, main, resolve_baud
 from serial_scope.demo import write_demo_log
 from serial_scope.events import DecodeError
 from serial_scope.logfile import LogReader, LogWriter, log_parts
@@ -214,3 +214,40 @@ def test_format_event_error() -> None:
 
     clock = _Clock(absolute=False)
     assert format_event(DecodeError(5.0, "crc", "bad"), clock) == "+    0.000s  ! crc: bad"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["monitor", "loop://"], 115200),
+        (["monitor", "loop://", "--decode", "odometry"], 921600),
+        (["monitor", "loop://", "--decode", "nrf24"], 115200),
+        (["monitor", "loop://", "--decode", "odometry", "-b", "460800"], 460800),
+        (["send", "loop://", "--odometry", "stop"], 921600),
+        (["send", "loop://", "-b", "460800", "--odometry", "stop"], 460800),
+    ],
+)
+def test_baud_defaults_by_decoder_and_explicit_baud_wins(argv: list[str], expected: int) -> None:
+    args = build_parser().parse_args(argv)
+    decoder = "odometry" if args.command == "send" else args.decode
+    assert resolve_baud(args, decoder) == expected
+    assert args.baud_defaulted == ("-b" not in argv)
+
+
+def test_monitor_odometry_defaults_to_921600_and_warns_on_undecodable_bytes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    send = r"hello\x00world\x00"
+    argv = ["monitor", "loop://", "--decode", "odometry", "--send", send]
+    code = main([*argv, "--duration", "0.5", "--show", "none"])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "[connected to loop://@921600]" in err
+    assert "no frame decoded; is the baud rate right?" in err
+    assert "921600 baud, the default" in err
+    assert "460800 on NUCLEO-F446RE" in err
+
+
+def test_monitor_without_errors_does_not_warn(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["monitor", "loop://", "--send", r"a:1\r\n", "--duration", "0.3", "--decode", "plotter"])
+    assert "is the baud rate right" not in capsys.readouterr().err

@@ -39,6 +39,51 @@ from serial_scope.triggers import TriggerSet, TriggerSpecError, parse_trigger
 
 SHOW_MODES = ("decoded", "text", "samples", "raw", "hex", "none")
 
+DEFAULT_BAUD = 115200
+
+
+class UsageError(ValueError):
+    """A combination of command-line options that cannot work."""
+
+
+# encoder-odometry-firmware: 921600 on ESP32 / ESP32-S3, 460800 on NUCLEO-F446RE.
+ODOMETRY_BAUD = 921600
+# Baud used when -b is not given, by decoder. ina219-battery-monitor and
+# nrf24-telemetry-link run at 115200; auto-detect cannot know the rate, so it uses 115200.
+DECODER_BAUD = {"odometry": ODOMETRY_BAUD}
+ODOMETRY_BAUD_NOTE = (
+    "encoder-odometry-firmware runs at 921600 on ESP32/ESP32-S3 and 460800 on "
+    "NUCLEO-F446RE (pass -b 460800 there)"
+)
+FIRMWARE_BAUD_NOTE = (
+    ODOMETRY_BAUD_NOTE + "; ina219-battery-monitor and nrf24-telemetry-link run at 115200"
+)
+
+
+def default_baud(decoder: str | None) -> int:
+    """Baud rate used when the user gives no ``-b``: by decoder, else 115200."""
+    return DECODER_BAUD.get(decoder or "", DEFAULT_BAUD)
+
+
+def resolve_baud(args: argparse.Namespace, decoder: str | None) -> int:
+    """Fill in ``args.baud`` if it was not given and record whether it was a default."""
+    if getattr(args, "baud", None) is None:
+        args.baud = default_baud(decoder)
+        args.baud_defaulted = True
+    elif not hasattr(args, "baud_defaulted"):
+        args.baud_defaulted = False
+    baud: int = args.baud
+    return baud
+
+
+def baud_hint(args: argparse.Namespace, note: str = FIRMWARE_BAUD_NOTE) -> str:
+    """Text naming the baud rate in use, appended to link-level failure messages."""
+    baud = getattr(args, "baud", None)
+    if baud is None:
+        return ""
+    how = "the default" if getattr(args, "baud_defaulted", False) else "from -b"
+    return f" (port opened at {baud} baud, {how}; {note})"
+
 
 class _Clock:
     """Formats event times as an offset from the first event, or as wall-clock time."""
@@ -173,6 +218,11 @@ def run_stream(
     if not args.quiet:
         err.write(summary_text(session) + "\n")
     errors = sum(session.totals.errors.values())
+    if getattr(args, "baud", None) is not None and errors > 0 and session.totals.samples == 0:
+        err.write(
+            f"warning: {errors} decode errors and no frame decoded; "
+            f"is the baud rate right?{baud_hint(args)}\n"
+        )
     if args.max_errors is not None and errors > args.max_errors:
         err.write(f"{errors} decode errors exceed --max-errors {args.max_errors}\n")
         return 3
@@ -249,6 +299,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
+    resolve_baud(args, args.decode)
     try:
         transport = parse_source(args.source, args.baud)
     except (ValueError, LogFormatError, OSError) as exc:
@@ -541,6 +592,7 @@ def run_send(
                 found = decoder.protocol_version
                 reason = (
                     f"no protocol_version reply within {VERSION_TIMEOUT_S:g} s"
+                    + baud_hint(args, ODOMETRY_BAUD_NOTE)
                     if found is None
                     else f"firmware speaks protocol version {found}, not {PROTOCOL_VERSION}"
                 )
@@ -600,7 +652,7 @@ def run_send(
         )
         return 0
     if reply is None:
-        err.write(f"no PARAM_VALUE reply within {wait:g} s\n")
+        err.write(f"no PARAM_VALUE reply within {wait:g} s{baud_hint(args, ODOMETRY_BAUD_NOTE)}\n")
         return EXIT_NO_REPLY
     code = int(reply.fields["status"])
     if code != 0:
@@ -615,6 +667,7 @@ def cmd_send(args: argparse.Namespace) -> int:
     if not args.source:
         print("error: SOURCE is required unless --dry-run is given", file=sys.stderr)
         return 2
+    resolve_baud(args, "odometry")
     try:
         transport = parse_source(args.source, args.baud)
     except (ValueError, LogFormatError, OSError) as exc:
@@ -633,7 +686,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
         replay=args.replay,
         speed=args.speed,
         port=args.port,
-        baud=args.baud,
+        baud=resolve_baud(args, args.decode),
         decoder=args.decode,
         theme=args.theme,
         buffer_len=args.buffer,
@@ -714,7 +767,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("monitor", help="read a serial port or TCP socket")
     p.add_argument("source", help="COM5, /dev/ttyUSB0, tcp://192.168.4.1:3333 or a pyserial URL")
-    p.add_argument("-b", "--baud", type=int, default=115200, help="baud rate (default 115200)")
+    p.add_argument(
+        "-b",
+        "--baud",
+        type=int,
+        default=None,
+        help="baud rate (default: 921600 with --decode odometry, else 115200)",
+    )
     p.add_argument("--no-reconnect", action="store_true", help="exit when the link drops")
     p.add_argument("--send", metavar="TEXT", help="send TEXT once connected (\\n etc. allowed)")
     _add_stream_options(p)
@@ -747,7 +806,13 @@ def build_parser() -> argparse.ArgumentParser:
         "sends stop.",
     )
     p.add_argument("source", nargs="?", help="COM5, /dev/ttyUSB0, tcp://host:port, loop://")
-    p.add_argument("-b", "--baud", type=int, default=115200, help="baud rate (default 115200)")
+    p.add_argument(
+        "-b",
+        "--baud",
+        type=int,
+        default=None,
+        help="baud rate (default 921600, as on ESP32; NUCLEO-F446RE firmware needs -b 460800)",
+    )
     p.add_argument(
         "--odometry",
         nargs="+",
@@ -793,7 +858,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("gui", help="open the graphical monitor")
     p.add_argument("--port", help="connect to this port on start")
-    p.add_argument("-b", "--baud", type=int, default=115200)
+    p.add_argument(
+        "-b",
+        "--baud",
+        type=int,
+        default=None,
+        help="baud rate (default: 921600 with --decode odometry, else 115200)",
+    )
     p.add_argument("--replay", metavar="LOG", help="replay this log on start")
     p.add_argument("--speed", type=_positive_float, default=1.0, help="replay speed")
     p.add_argument("--decode", default="auto", choices=list(available_decoders()))
@@ -808,7 +879,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result: int = args.func(args)
-    except TriggerSpecError as exc:
+    except (TriggerSpecError, UsageError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except TransportError as exc:
