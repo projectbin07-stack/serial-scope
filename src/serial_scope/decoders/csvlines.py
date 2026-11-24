@@ -7,7 +7,9 @@ row of numbers. A column whose name is a known device-clock name (``t_ms``, ``mi
 
 A header repeated later (the board was reset and printed it again) is accepted and may
 change the columns. Rows with the wrong number of fields or with a non-numeric value
-are reported as errors.
+are reported as errors. If the header was missed (the device printed it once at boot,
+before the monitor was attached), the column names can be given up front with
+``CsvDecoder(columns=[...])`` (``--columns`` on the command line).
 """
 
 from __future__ import annotations
@@ -47,10 +49,12 @@ class CsvDecoder(LineDecoder):
     name = "csv"
     description = "CSV with a header line; t_ms/millis/time_us columns become device time"
 
-    def __init__(self) -> None:
+    def __init__(self, columns: list[str] | None = None, delimiter: str = ",") -> None:
+        """``columns`` names the fields up front, for a device that printed its header
+        before the monitor was attached; a header seen later still replaces them."""
         super().__init__()
-        self.delimiter: str | None = None
-        self.columns: list[str] = []
+        self.delimiter: str | None = delimiter if columns else None
+        self.columns: list[str] = list(columns) if columns else []
 
     def decode_line(self, t: float, text: str, raw: bytes) -> list[Event]:
         header = detect_header(text)

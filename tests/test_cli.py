@@ -10,7 +10,7 @@ from conftest import DATA
 from serial_scope import __version__
 from serial_scope.cli import build_parser, format_event, log_stats, main, resolve_baud
 from serial_scope.demo import write_demo_log
-from serial_scope.events import DecodeError
+from serial_scope.events import Chunk, DecodeError
 from serial_scope.logfile import LogReader, LogWriter, log_parts
 from serial_scope.ports import PortInfo
 
@@ -251,3 +251,38 @@ def test_monitor_odometry_defaults_to_921600_and_warns_on_undecodable_bytes(
 def test_monitor_without_errors_does_not_warn(capsys: pytest.CaptureFixture[str]) -> None:
     main(["monitor", "loop://", "--send", r"a:1\r\n", "--duration", "0.3", "--decode", "plotter"])
     assert "is the baud rate right" not in capsys.readouterr().err
+
+
+def test_columns_decode_csv_rows_whose_header_was_missed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = tmp_path / "noheader.sslog"
+    with LogWriter(log, {"source": "test"}, start_time=1000.0) as w:
+        for k in range(5):
+            w.write(Chunk(f"{k * 10},{k},{2 * k}\r\n".encode(), 1000.0 + k))
+    # Without a header nothing is decoded.
+    main(["replay", str(log), "--decode", "csv", "--show", "none"])
+    assert "0 samples" in capsys.readouterr().err
+    out_csv = tmp_path / "out.csv"
+    argv = ["replay", str(log), "--columns", "t_ms,ax,ay", "--show", "none", "--csv"]
+    assert main([*argv, str(out_csv)]) == 0
+    assert "5 samples" in capsys.readouterr().err
+    with out_csv.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [float(r["ay"]) for r in rows] == [0.0, 2.0, 4.0, 6.0, 8.0]
+    assert [float(r["device_time"]) for r in rows] == [0.0, 0.01, 0.02, 0.03, 0.04]
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--columns", "a,b", "--decode", "ina219"], "only applies to the csv decoder"),
+        (["--columns", "a"], "two or more distinct"),
+        (["--columns", "a,a"], "two or more distinct"),
+    ],
+)
+def test_columns_usage_errors(
+    plotter_log: Path, capsys: pytest.CaptureFixture[str], extra: list[str], message: str
+) -> None:
+    assert main(["replay", str(plotter_log), *extra]) == 2
+    assert message in capsys.readouterr().err

@@ -21,6 +21,8 @@ from serial_scope.commands import (
 )
 from serial_scope.connection import ReconnectingSource
 from serial_scope.decoders import available_decoders
+from serial_scope.decoders.base import Decoder
+from serial_scope.decoders.csvlines import CsvDecoder
 from serial_scope.decoders.odometry import (
     PARAM_STATUS,
     PROTOCOL_VERSION,
@@ -135,8 +137,16 @@ def _build_triggers(specs: Sequence[str], hysteresis: float, holdoff: float) -> 
 
 def _make_session(args: argparse.Namespace) -> Session:
     triggers = _build_triggers(args.trigger, args.hysteresis, args.holdoff)
+    decoder: Decoder | str = args.decode
+    if getattr(args, "columns", None):
+        if args.decode not in ("auto", "csv"):
+            raise UsageError("--columns only applies to the csv decoder")
+        names = [n.strip() for n in args.columns.split(",")]
+        if len(names) < 2 or not all(names) or len(set(names)) != len(names):
+            raise UsageError("--columns needs two or more distinct comma-separated names")
+        decoder = CsvDecoder(names)
     session = Session(
-        args.decode,
+        decoder,
         buffer_len=args.buffer,
         time_base=args.time_base,
         triggers=triggers,
@@ -709,6 +719,12 @@ def _add_stream_options(p: argparse.ArgumentParser) -> None:
         default="auto",
         choices=list(available_decoders()),
         help="decoder (default: auto-detect)",
+    )
+    p.add_argument(
+        "--columns",
+        metavar="A,B,...",
+        help="csv decoder: column names, for a device whose header line was printed "
+        "before the monitor attached (a header seen later replaces them)",
     )
     p.add_argument("--log", metavar="FILE.sslog", help="record every byte to a raw log")
     p.add_argument(
