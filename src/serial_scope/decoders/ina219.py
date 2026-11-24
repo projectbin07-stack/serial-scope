@@ -17,6 +17,7 @@ sequence number (``dropped``) and sequence restarts (``restarts``, a device rese
 from __future__ import annotations
 
 from serial_scope.decoders.base import LineDecoder
+from serial_scope.decoders.cobsframes import ClockUnwrapper
 from serial_scope.decoders.framing import crc8
 from serial_scope.events import Event, Sample
 
@@ -100,6 +101,8 @@ class Ina219Decoder(LineDecoder):
     def __init__(self) -> None:
         super().__init__()
         self.last_seq: int | None = None
+        # t_ms is the firmware's millis(); unwrap it across the 49.7-day wrap.
+        self._clock = ClockUnwrapper(32, 1e-3)
 
     def decode_line(self, t: float, text: str, raw: bytes) -> list[Event]:
         stripped = text.strip()
@@ -113,6 +116,8 @@ class Ina219Decoder(LineDecoder):
         if self.last_seq is not None:
             if seq > self.last_seq:
                 self.counts["dropped"] += seq - self.last_seq - 1
+            elif self.last_seq - seq > UINT32_MAX // 2:  # 32-bit sequence wrap
+                self.counts["dropped"] += (seq - self.last_seq - 1) % (UINT32_MAX + 1)
             else:
                 self.counts["restarts"] += 1
         self.last_seq = seq
@@ -122,4 +127,4 @@ class Ina219Decoder(LineDecoder):
             for value, (_, _, _, channel, scale) in zip(fields, _FIELDS, strict=True)
             if channel
         }
-        return [Sample(t=t, values=values, device_t=t_ms / 1000.0, source="BM1")]
+        return [Sample(t=t, values=values, device_t=self._clock(t_ms), source="BM1")]

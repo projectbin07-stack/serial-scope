@@ -349,6 +349,9 @@ def message_values(name: str, fields: dict[str, Any]) -> dict[str, float]:
 # -- decoder -------------------------------------------------------------------------------
 
 
+_UPTIME_HALF_RANGE = 1 << 31
+
+
 class Nrf24GatewayDecoder(CobsFrameDecoder):
     name = "nrf24"
     description = "nrf24-telemetry-link gateway USB packets: COBS + CRC-16, radio link stats"
@@ -438,9 +441,16 @@ class Nrf24GatewayDecoder(CobsFrameDecoder):
     def _stats(self, t: float, stats: dict[str, int]) -> list[Event]:
         events: list[Event] = []
         previous = self.last_stats
+        # uptime_ms is the gateway's millis(): a large step backwards (more than half the
+        # 32-bit range) is the wrap after 49.7 days, not a restart.
+        uptime_back = previous is not None and stats["uptime_ms"] < previous["uptime_ms"]
+        wrapped = (
+            uptime_back
+            and previous is not None
+            and (previous["uptime_ms"] - stats["uptime_ms"] > _UPTIME_HALF_RANGE)
+        )
         restarted = previous is not None and (
-            stats["uptime_ms"] < previous["uptime_ms"]
-            or any(stats[f] < previous[f] for f in QUALITY_FIELDS)
+            (uptime_back and not wrapped) or any(stats[f] < previous[f] for f in QUALITY_FIELDS)
         )
         if restarted:
             self.counts["gateway_restarts"] += 1

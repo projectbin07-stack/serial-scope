@@ -460,3 +460,20 @@ def test_notices_reach_triggers_cli_output_and_summary() -> None:
     assert "radio link (device totals): frames_received 0, crc_errors 0" in summary
     assert "unreliable_lost 3" in summary
     assert "notices: link 1" in summary
+
+
+def test_millis_wrap_is_not_a_gateway_restart() -> None:
+    # uptime_ms is the gateway's millis(); after 49.7 days it wraps to zero. Before 0.2.1
+    # this counted as a restart and the counters looked reset.
+    decoder = Nrf24GatewayDecoder()
+    events = []
+    for k, uptime in enumerate([2**32 - 1500, 2**32 - 500, 500, 1500]):
+        body = _stats_body(uptime_ms=uptime, frames_received=1000 + 50 * k)
+        events += decoder.feed(encode_wire(0x02, k, body), float(k))
+    assert decoder.counts["gateway_restarts"] == 0
+    assert not [n for n in notices(events) if "restarted" in n.detail]
+    times = [s.device_t for s in samples(events)]
+    assert times == pytest.approx([4294965.796, 4294966.796, 4294967.796, 4294968.796])
+    # A small step back in uptime is still a restart.
+    decoder.feed(encode_wire(0x02, 4, _stats_body(uptime_ms=100, frames_received=1300)), 5.0)
+    assert decoder.counts["gateway_restarts"] == 1

@@ -159,3 +159,22 @@ def test_non_frame_lines_are_text() -> None:
     events = Ina219Decoder().feed(b"hello\r\n#OK RESET\r\n", 1.0)
     assert texts(events) == ["hello", "#OK RESET"]
     assert errors(events) == []
+
+
+def test_device_time_is_unwrapped_across_the_millis_wrap() -> None:
+    decoder = Ina219Decoder()
+    events = []
+    for k, t_ms in enumerate([2**32 - 2000, 2**32 - 1000, 0, 1000]):
+        line = encode_bm1([100 + k, t_ms, 7400, 1000, 7400, 0, 0, 900, 0]) + "\r\n"
+        events += decoder.feed(line.encode(), float(k))
+    times = [s.device_t for s in samples(events)]
+    assert times == pytest.approx([4294965.296, 4294966.296, 4294967.296, 4294968.296])
+    assert decoder.counts["restarts"] == 0
+
+
+def test_sequence_wrap_counts_drops_not_a_restart() -> None:
+    decoder = Ina219Decoder()
+    for seq in (2**32 - 2, 2**32 - 1, 1):
+        decoder.feed((encode_bm1([seq, seq, 0, 0, 0, 0, 0, 0, 0]) + "\r\n").encode(), 0.0)
+    assert decoder.counts["restarts"] == 0
+    assert decoder.counts["dropped"] == 1  # seq 0 is missing
