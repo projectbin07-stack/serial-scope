@@ -10,7 +10,7 @@ who live in the Arduino serial monitor.
 
 *The screenshots show replayed synthetic demo data (`serial-scope demo`), not a live board.*
 
-> **Status:** v0.2.0. Everything below is implemented and tested in CI on Linux and Windows,
+> **Status:** v0.3.0. Everything below is implemented and tested in CI on Linux and Windows,
 > but **serial-scope has not yet been connected to a real board**, and the command sending
 > added in 0.2.0 **has never driven a real motor**. See
 > [Hardware validation status](#hardware-validation-status).
@@ -139,10 +139,14 @@ Details:
   spaces or tabs, optionally `label:value`. A line with any token that is neither is text.
   `nan` / `inf` are recognised and left out of the plot.
 - **csv** errors: `columns` (wrong number of fields) and `value` (a non-numeric field). A
-  repeated header (after a board reset) is accepted and may change the columns.
+  repeated header (after a board reset) is accepted and may change the columns. A sketch
+  that prints its header only in `setup()` gives nothing if serial-scope attaches later
+  (opening the port does not reset every board); `--columns t_ms,ax,ay,az` supplies the
+  names.
 - **ina219** re-implements the format documented in ina219-battery-monitor: CRC-8 (poly
   0x07) over everything between `$` and `*`. Errors: `crc`, `format`. Sequence numbers give
   `dropped` (frames missing) and `restarts` (counter went backwards). `#...` lines are text.
+  `t_ms` is unwrapped across the 49.7-day `millis()` wrap, so device time keeps increasing.
 - **odometry** re-implements protocol version 1 of encoder-odometry-firmware
   ([docs/protocol.md](https://github.com/projectbin07-stack/encoder-odometry-firmware/blob/main/docs/protocol.md)):
   COBS framing with a `00` delimiter, CRC-16/CCITT-FALSE, all eight message types. Errors:
@@ -214,11 +218,15 @@ options:
 `monitor` and `replay` share these options (`serial-scope monitor --help`):
 
 ```text
-  -b, --baud BAUD       baud rate (default 115200)
+  -b, --baud BAUD       baud rate (default: 921600 with --decode odometry,
+                        else 115200)
   --no-reconnect        exit when the link drops
   --send TEXT           send TEXT once connected (\n etc. allowed)
   --decode {auto,ina219,odometry,nrf24,jsonl,csv,plotter,text}
                         decoder (default: auto-detect)
+  --columns A,B,...     csv decoder: column names, for a device whose header
+                        line was printed before the monitor attached (a header
+                        seen later replaces them)
   --log FILE.sslog      record every byte to a raw log
   --rotate-mb MB        start a new log part every MB
   --csv FILE.csv        export decoded samples as CSV
@@ -244,6 +252,14 @@ options:
 
 (`--send` and `--no-reconnect` are `monitor` only; `replay` adds `--speed`, where 1 is the
 original pace, 4 is four times faster and 0, the default, is as fast as possible.)
+
+**Baud rate.** `-b` always wins. Without it, `monitor` and `gui` open the port at 921600
+with `--decode odometry` (encoder-odometry-firmware on ESP32 / ESP32-S3) and at 115200
+otherwise (ina219-battery-monitor, nrf24-telemetry-link, most Arduino sketches); `send`
+uses 921600. encoder-odometry-firmware on the NUCLEO-F446RE runs at **460800**, so pass
+`-b 460800` there. Auto-detection cannot guess the rate, so with `--decode auto` an
+odometry board needs `-b`. When bytes arrive but only decode errors come out, the summary
+ends with a warning naming the baud rate in use.
 
 Sources for `monitor`: `COM5`, `/dev/ttyUSB0`, `tcp://192.168.4.1:3333` (an ESP32 serving
 telemetry over Wi-Fi) or any [pyserial URL](https://pyserial.readthedocs.io/en/latest/url_handlers.html)
@@ -456,7 +472,11 @@ serial-scope stats soak.sslog --json
 > byte vectors and through pyserial's `loop://` device; **it has never driven a real
 > motor**.
 
+`send` opens the port at 921600 baud unless `-b` is given (ESP32 / ESP32-S3 boards);
+for the NUCLEO-F446RE build, which runs at 460800, add `-b 460800`:
+
 ```console
+serial-scope send COM5 -b 460800 --odometry stop          # NUCLEO-F446RE
 serial-scope send COM5 --odometry vel 0.2 0 0.1           # vx m/s, vy m/s, wz rad/s, once
 serial-scope send COM5 --odometry vel 0.2 0 0.1 --hold 3  # repeat at 10 Hz for 3 s, then stop
 serial-scope send COM5 --odometry stop                    # zero velocity now
@@ -481,7 +501,8 @@ serial-scope send COM5 --odometry set-param kp 0.03
   directions, `--seq N` sets the first sequence number.
 - Exit status: 0 sent (and for parameters answered `ok`), 1 the firmware rejected a parameter
   request, 2 bad arguments or the port failed, 4 no `PARAM_VALUE` reply within `--wait`
-  (default 1 s), 5 the protocol version was not confirmed, 130 interrupted.
+  (default 1 s), 5 the protocol version was not confirmed, 130 interrupted. Both "no
+  reply" messages name the baud rate the port was opened at, the most likely cause.
 - `send` opens the port itself, and Windows lets only one program hold a COM port: close
   `monitor` or the GUI first, or use the GUI's command panel, which sends on the connection
   it is already reading.
@@ -513,7 +534,7 @@ velocity command (exit 5) and a parameter request gets no reply (exit 4):
 $ serial-scope send loop:// --odometry vel 0.2 0 0.1 --hold 0.5
 +    0.000s  > get protocol_version  seq 0  [03 01 05 05 01 16 de 46 00]
 +    0.000s  PARAM_GET protocol_version
-not sending a velocity command: no protocol_version reply within 1 s
+not sending a velocity command: no protocol_version reply within 1 s (port opened at 921600 baud, the default; encoder-odometry-firmware runs at 921600 on ESP32/ESP32-S3 and 460800 on NUCLEO-F446RE (pass -b 460800 there))
 
 $ serial-scope send loop:// --odometry vel 0.2 0 0.1 --hold 0.5 --no-version-check
 +    0.000s  > velocity vx=0.2 m/s vy=0 m/s wz=0.1 rad/s  seq 0  [03 01 01 06 0c cd cc 4c 3e 01 01 01 07 cd cc cc 3d 19 41 00]
@@ -530,7 +551,7 @@ sent 6 frame(s); the protocol has no acknowledgement for velocity commands
 $ serial-scope send loop:// --odometry get-param watchdog_ms
 +    0.000s  > get watchdog_ms  seq 0  [03 01 05 05 01 0a 63 95 00]
 +    0.000s  PARAM_GET watchdog_ms
-no PARAM_VALUE reply within 1 s
+no PARAM_VALUE reply within 1 s (port opened at 921600 baud, the default; encoder-odometry-firmware runs at 921600 on ESP32/ESP32-S3 and 460800 on NUCLEO-F446RE (pass -b 460800 there))
 ```
 
 ```text
@@ -768,6 +789,11 @@ If you run it against a board, an issue describing the board, adapter, OS and wh
   memory; the log keeps everything.
 - Auto-detection needs a few records. A stream that mixes formats (JSON and plotter lines from
   the same board) is decoded with whichever wins; force a decoder if it guesses wrong.
+- The baud rate is chosen when the port is opened. In the GUI the baud box is filled from
+  `-b` / `--decode` at start; switching decoder later does not change it.
+- The nrf24 decoder names the odometry channels `odom.v` / `odom.w` (the message's fields)
+  while the odometry decoder uses `odom.vx` / `odom.wz`; tools reading both CSVs must map
+  them.
 - The terminal does not interpret ANSI escape sequences; they are shown as `<ESC>[...`.
 - Commands exist only for encoder-odometry-firmware (velocity, stop, parameters); there is
   no SET_POSE, and nothing is sent to the nrf24 gateway (its `send_command` and

@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-24
+
+### Changed
+
+- `-b/--baud` no longer always defaults to 115200. Without `-b`, `send` and
+  `monitor`/`gui --decode odometry` open the port at 921600, the rate of
+  encoder-odometry-firmware on ESP32 / ESP32-S3; everything else keeps 115200. The
+  NUCLEO-F446RE build runs at 460800 and needs `-b 460800`. Before, `send COM5 --odometry
+  ...` as written in the README opened the port at 115200 against firmware running at
+  921600 or 460800, and the only symptom was "no protocol_version reply within 1 s".
+- The "no protocol_version reply" and "no PARAM_VALUE reply" messages name the baud rate in
+  use and the firmware's rates, and `monitor` warns at the end when bytes arrived but only
+  decode errors came out.
+
+### Fixed
+
+- nrf24 decoder: the gateway's `uptime_ms` wrapping after 49.7 days was reported as
+  "gateway restarted" and counted in `gateway_restarts`. A step back of more than half the
+  32-bit range is now a wrap; a small step back is still a restart.
+- ina219 decoder: device time jumped from 4294966.3 s back to 0 at the `millis()` wrap; it is
+  now unwrapped like the other decoders' clocks. A 32-bit sequence wrap counts as dropped
+  frames, not a restart.
+
+### Added
+
+- `--columns A,B,...` for `monitor` and `replay`: column names for the csv decoder when the
+  device printed its header before serial-scope attached. Before, such a stream decoded
+  nothing (0 of 3450 samples in an MPU6050 example); with the names it decodes all of them.
+
+### Not done
+
+- No hardware was used for this release either; the baud defaults come from the firmware
+  repositories' `platformio.ini` / `board_config.h`, not from a board.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
@@ -66,5 +100,6 @@ All notable changes to this project are documented here. The format follows
 - CLI: `list`, `monitor`, `replay`, `stats`, `decoders`, `demo`, `gui`.
 - Synthetic demo logs for every supported format.
 
+[0.3.0]: https://github.com/projectbin07-stack/serial-scope/releases/tag/v0.3.0
 [0.2.0]: https://github.com/projectbin07-stack/serial-scope/releases/tag/v0.2.0
 [0.1.0]: https://github.com/projectbin07-stack/serial-scope/releases/tag/v0.1.0
